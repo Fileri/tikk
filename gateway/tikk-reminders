@@ -1,0 +1,233 @@
+#!/usr/bin/env python3
+"""tikk-reminders — the verbs behind tikk's SSH gateway (EventKit backend).
+
+Runs on the Mac, called by tikk-dispatch. Talks to Reminders through
+`reminders` (keith/reminders-cli, `brew install keith/formulae/reminders-cli`),
+which uses EventKit directly: no Reminders.app involvement, every verb answers
+in well under a second, and shared lists work.
+
+Permission: the ssh session's TCC identity needs the *Reminders* grant. On
+current macOS that grant appears together with the Automation → Reminders
+grant that an `osascript` call from the same ssh session prompts for (the
+prompt shows on the Mac's screen; click Allow there or via Screen Sharing).
+`tikk-reminders check` tells you whether it is in place.
+
+Output: plain text for humans, `--json` for clients. Dates are converted to
+the Mac's local time zone; a due date at local midnight is reported as all-day.
+
+Python 3.9 compatible (that is what ships with Xcode CLT).
+"""
+import argparse
+import datetime as dt
+import json
+import os
+import subprocess
+import sys
+import time
+
+# Looked up in this order; nothing user-writable earlier than the tool itself.
+CANDIDATES = [
+    os.path.join(os.path.dirname(os.path.realpath(__file__)), "reminders"),
+    "/opt/homebrew/bin/reminders",
+    "/usr/local/bin/reminders",
+]
+PROC_TIMEOUT = 30
+
+# sysexits.h
+EX_USAGE, EX_DATAERR, EX_NOINPUT, EX_UNAVAILABLE, EX_NOPERM, EX_CONFIG = 64, 65, 66, 69, 77, 78
+
+PRIORITY_NAMES = {0: "none", 1: "high", 5: "medium", 9: "low"}
+
+
+class ToolError(Exception):
+    def __init__(self, code, message):
+        Exception.__init__(self, message)
+        self.code = code
+
+
+def find_tool():
+    for c in CANDIDATES:
+        if os.access(c, os.X_OK):
+            return c
+    raise ToolError(EX_CONFIG, "reminders-cli not found (looked in %s); brew install keith/formulae/reminders-cli"
+                    % ", ".join(CANDIDATES))
+
+
+def rem(*args):
+    """Run reminders-cli; return stdout. Maps its failure modes to exit codes."""
+    cmd = [find_tool()] + list(args)
+    try:
+        p = subprocess.run(cmd, capture_output=True, text=True, timeout=PROC_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        raise ToolError(EX_UNAVAILABLE, "reminders-cli did not return within %ds" % PROC_TIMEOUT)
+    if p.returncode == 0:
+        return p.stdout
+    err = (p.stderr or p.stdout).strip()
+    low = err.lower()
+    if "grant" in low and "access" in low:
+        raise ToolError(EX_NOPERM, "no Reminders access for this session: %s. Trigger the grant once with an "
+                        "osascript call to Reminders from the same ssh session and click Allow on the Mac" % err)
+    if "no reminders list matching" in low:
+        raise ToolError(EX_NOINPUT, err)
+    if "no reminder at index" in low:
+        raise ToolError(EX_NOINPUT, err)
+    raise ToolError(EX_UNAVAILABLE, err or "reminders-cli failed with exit %d" % p.returncode)
+
+
+def rem_json(*args):
+    out = rem(*args)
+    try:
+        return json.loads(out)
+    except ValueError:
+        raise ToolError(EX_UNAVAILABLE, "reminders-cli returned non-JSON output")
+
+
+def local_iso(utc_iso):
+    """'2026-09-10T16:00:00Z' → ('2026-09-10T18:00:00+02:00', allday?) in the Mac's zone."""
+    if not utc_iso:
+        return None, False
+    d = dt.datetime.strptime(utc_iso, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=dt.timezone.utc).astimezone()
+    return d.isoformat(), (d.hour, d.minute, d.second) == (0, 0, 0)
+
+
+def normalize(r):
+    due, allday = local_iso(r.get("dueDate"))
+    done, _ = local_iso(r.get("completionDate"))
+    return {
+        "id": r["externalId"],
+        "name": r["title"],
+        "body": r.get("notes") or None,
+        "due": due,
+        "allday": allday,
+        "priority": r.get("priority", 0),
+        "completed": bool(r.get("isCompleted")),
+        "completed_at": done,
+        "list": r.get("list"),
+    }
+
+
+def fetch(list_name, mode):
+    flags = {"open": [], "done": ["--only-completed"], "all": ["--include-completed"]}[mode]
+    return [normalize(r) for r in rem_json("show", list_name, "--format", "json", *flags)]
+
+
+def resolve(list_name, key, mode):
+    """Accept an id (UUID or x-apple-reminder://UUID) or an exact name; return the matching record."""
+    if key.startswith("x-apple-reminder://"):
+        key = key[len("x-apple-reminder://"):]
+    rs = fetch(list_name, mode)
+    what = "" if mode == "all" else mode + " "
+    if len(key) == 36 and key.count("-") == 4:
+        hits = [r for r in rs if r["id"].upper() == key.upper()]
+        if not hits:
+            raise ToolError(EX_NOINPUT, "no %sreminder with id %s in %s" % (what, key, list_name))
+        return hits[0]
+    hits = [r for r in rs if r["name"] == key]
+    if not hits:
+        raise ToolError(EX_NOINPUT, "no %sreminder named %r in %s" % (what, key, list_name))
+    if len(hits) > 1:
+        raise ToolError(EX_DATAERR, "ambiguous: %d reminders named %r in %s; use the id" % (len(hits), key, list_name))
+    return hits[0]
+
+
+def parse_due(s):
+    """Validate 'YYYY-MM-DD' or 'YYYY-MM-DD HH:MM' and hand reminders-cli the same string."""
+    s = s.strip().replace("T", " ")
+    for fmt in ("%Y-%m-%d %H:%M", "%Y-%m-%d"):
+        try:
+            dt.datetime.strptime(s, fmt)
+            return s
+        except ValueError:
+            continue
+    raise ValueError("due must be YYYY-MM-DD or 'YYYY-MM-DD HH:MM', got %r" % s)
+
+
+def print_reminders(rs):
+    for r in rs:
+        box = "☑" if r["completed"] else "☐"
+        pri = {1: " !!!", 5: " !!", 9: " !"}.get(r["priority"], "")
+        line = "%s %s%s" % (box, r["name"], pri)
+        if r["due"]:
+            line += "  (%s)" % (r["due"][:10] if r["allday"] else r["due"][:16].replace("T", " "))
+        print(line)
+        if r["body"]:
+            for bl in r["body"].splitlines():
+                print("    %s" % bl)
+        print("    %s" % r["id"])
+
+
+def main(argv):
+    want_json = "--json" in argv  # accepted anywhere: "--json show L" and "show L --json"
+    argv = [x for x in argv if x != "--json"]
+
+    ap = argparse.ArgumentParser(prog="tikk-reminders", description=__doc__.splitlines()[0])
+    ap.add_argument("--json", action="store_true", help="machine-readable output")
+    sub = ap.add_subparsers(dest="verb", required=True)
+    sub.add_parser("lists", help="names of all reminder lists")
+    sub.add_parser("check", help="verify the backend answers and the Reminders grant is in place")
+    p = sub.add_parser("show", help="reminders in a list (open ones by default)")
+    p.add_argument("list")
+    g = p.add_mutually_exclusive_group()
+    g.add_argument("--all", action="store_true", help="include completed reminders")
+    g.add_argument("--done", action="store_true", help="only completed reminders")
+    p = sub.add_parser("add", help="create a reminder; prints its id")
+    p.add_argument("list")
+    p.add_argument("name")
+    p.add_argument("--body", default="")
+    p.add_argument("--due", help="YYYY-MM-DD (all-day) or 'YYYY-MM-DD HH:MM'")
+    p.add_argument("--priority", type=int, default=0, choices=[0, 1, 5, 9],
+                   help="0 none, 1 high, 5 medium, 9 low (Reminders' own scale)")
+    for verb, mode in (("complete", "open"), ("uncomplete", "done"), ("delete", "all")):
+        p = sub.add_parser(verb, help="%s a reminder by id or exact name" % verb)
+        p.add_argument("list")
+        p.add_argument("key")
+        p.set_defaults(mode=mode)
+    a = ap.parse_args(argv)
+    a.json = want_json
+
+    log = lambda m: sys.stderr.write("tikk: %s\n" % m)
+    emit = lambda obj: print(json.dumps(obj, ensure_ascii=False))
+
+    try:
+        if a.verb == "lists":
+            names = [n for n in rem("show-lists").splitlines() if n]
+            emit(names) if a.json else print("\n".join(names))
+
+        elif a.verb == "check":
+            t0 = time.time()
+            n = len([n for n in rem("show-lists").splitlines() if n])
+            ms = int((time.time() - t0) * 1000)
+            info = {"ok": True, "lists": n, "ms": ms, "backend": "eventkit", "tool": find_tool()}
+            emit(info) if a.json else print("ok: %d lists in %d ms via %s" % (n, ms, info["tool"]))
+
+        elif a.verb == "show":
+            rs = fetch(a.list, "done" if a.done else ("all" if a.all else "open"))
+            emit(rs) if a.json else print_reminders(rs)
+
+        elif a.verb == "add":
+            args = ["add", a.list, a.name, "--format", "json", "--priority", PRIORITY_NAMES[a.priority]]
+            if a.body:
+                args += ["--notes", a.body]
+            if a.due:
+                args += ["--due-date", parse_due(a.due)]
+            r = normalize(rem_json(*args))
+            emit(r) if a.json else print(r["id"])
+
+        else:  # complete / uncomplete / delete
+            r = resolve(a.list, a.key, a.mode)
+            if a.verb == "delete" and r["completed"]:
+                rem("uncomplete", a.list, r["id"])  # reminders-cli's delete only sees open reminders
+            rem(a.verb, a.list, r["id"])
+            emit({"id": r["id"], a.verb + "d": True}) if a.json else print(r["id"])
+
+    except ValueError as e:
+        log(str(e))
+        return EX_USAGE
+    except ToolError as e:
+        log(str(e))
+        return e.code
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

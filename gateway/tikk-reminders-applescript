@@ -1,0 +1,399 @@
+#!/usr/bin/env python3
+"""tikk-reminders-applescript — the same verbs, driven through Reminders.app via osascript.
+
+NOT the default backend. Kept as a documented dead end and as a fallback for
+Macs where the EventKit grant cannot be obtained. Measured on macOS 26.6:
+reads take 0.3-2 s, but every `make new reminder` takes ~28 s and so does
+every mutation in a shared list, because Reminders.app spins on its main
+thread for ~25 s after the save (hundreds of TCC lookups per second) and
+answers no other Apple events meanwhile. AppleScript also only sees the
+lists of the default account. `tikk-reminders` (EventKit via reminders-cli)
+has none of these problems.
+
+Original description follows.
+
+
+Runs on the Mac. Talks to Reminders.app through osascript, which needs one
+Automation grant: System Settings → Privacy & Security → Automation →
+sshd-keygen-wrapper → Reminders (the prompt appears on the Mac's screen the
+first time; click Allow there or via Screen Sharing).
+
+Design notes
+- Every user-supplied value reaches AppleScript as an `on run argv` argument,
+  never by string interpolation into the script source.
+- Bulk property fetches (`name of every reminder whose …`) keep the number of
+  Apple events constant regardless of list size.
+- Records come back separated by ASCII 30/31 so names containing commas,
+  quotes or newlines survive the trip.
+- Error -1712 (Apple event timed out) means Reminders.app is wedged, which
+  happens after a cold launch from a headless session: we restart the app and
+  retry once. Error -1743 means the Automation grant is missing.
+
+Python 3.9 compatible (that is what ships with Xcode CLT).
+"""
+import argparse
+import datetime as dt
+import json
+import re
+import subprocess
+import sys
+import time
+
+OSASCRIPT = "/usr/bin/osascript"
+RS, US = "\x1e", "\x1f"
+SCRIPT_TIMEOUT = 60  # seconds, inside AppleScript
+PROC_TIMEOUT = SCRIPT_TIMEOUT + 30
+
+# sysexits.h
+EX_USAGE, EX_DATAERR, EX_NOINPUT, EX_UNAVAILABLE, EX_TEMPFAIL, EX_NOPERM = 64, 65, 66, 69, 75, 77
+
+ERR_TIMEOUT, ERR_NOPERM, ERR_NOSUCH = -1712, -1743, -1728
+ERR_NOT_FOUND, ERR_AMBIGUOUS = 9001, 9002  # ours, raised from the scripts
+
+PRELUDE = '''
+on iso(d)
+    if d is missing value then return ""
+    return (d as «class isot») as string
+end iso
+on txt(v)
+    if v is missing value then return ""
+    return v as text
+end txt
+on joinRS(xs)
+    set {tid, AppleScript's text item delimiters} to {AppleScript's text item delimiters, character id 30}
+    set s to xs as text
+    set AppleScript's text item delimiters to tid
+    return s
+end joinRS
+'''
+
+SCRIPT_LISTS = PRELUDE + '''
+on run argv
+    with timeout of %d seconds
+        tell application "Reminders" to set names to name of every list
+    end timeout
+    return my joinRS(names)
+end run
+''' % SCRIPT_TIMEOUT
+
+SCRIPT_SHOW = PRELUDE + '''
+on run argv
+    set {listName, rMode} to items 1 thru 2 of argv
+    set US to character id 31
+    with timeout of %d seconds
+        tell application "Reminders"
+            tell list listName
+                if rMode is "open" then
+                    set rr to a reference to (every reminder whose completed is false)
+                else if rMode is "done" then
+                    set rr to a reference to (every reminder whose completed is true)
+                else
+                    set rr to a reference to every reminder
+                end if
+                set ids to id of rr
+                set names to name of rr
+                set bodies to body of rr
+                set dues to due date of rr
+                set alldays to allday due date of rr
+                set pris to priority of rr
+                set flags to flagged of rr
+                set dones to completed of rr
+            end tell
+        end tell
+    end timeout
+    set out to {}
+    repeat with i from 1 to count of ids
+        set end of out to (item i of ids) & US & (item i of names) & US & my txt(item i of bodies) & US & my iso(item i of dues) & US & my iso(item i of alldays) & US & ((item i of pris) as text) & US & ((item i of flags) as text) & US & ((item i of dones) as text)
+    end repeat
+    return my joinRS(out)
+end run
+''' % SCRIPT_TIMEOUT
+
+SCRIPT_ADD = PRELUDE + '''
+on run argv
+    -- argv: listName, name, body, dueKind (none|day|time), year, month, day, hour, minute, priority
+    set {listName, rName, rBody, dueKind} to items 1 thru 4 of argv
+    with timeout of %d seconds
+        tell application "Reminders"
+            tell list listName
+                set r to make new reminder with properties {name:rName}
+                if rBody is not "" then set body of r to rBody
+                if dueKind is not "none" then
+                    set d to current date
+                    set day of d to 1
+                    set year of d to (item 5 of argv as integer)
+                    set month of d to (item 6 of argv as integer)
+                    set day of d to (item 7 of argv as integer)
+                    set time of d to (item 8 of argv as integer) * 3600 + (item 9 of argv as integer) * 60
+                    if dueKind is "day" then
+                        set allday due date of r to d
+                    else
+                        set due date of r to d
+                    end if
+                end if
+                set pr to item 10 of argv as integer
+                if pr is not 0 then set priority of r to pr
+                return id of r
+            end tell
+        end tell
+    end timeout
+end run
+''' % SCRIPT_TIMEOUT
+
+SCRIPT_MUTATE = PRELUDE + '''
+on run argv
+    -- argv: listName, key (id or exact name), scope (open|done|all), action (complete|uncomplete|delete)
+    set {listName, rKey, rScope, rAction} to items 1 thru 4 of argv
+    with timeout of %d seconds
+        tell application "Reminders"
+            tell list listName
+                if rKey starts with "x-apple-reminder://" then
+                    set hits to every reminder whose id is rKey
+                else if rScope is "open" then
+                    set hits to every reminder whose name is rKey and completed is false
+                else if rScope is "done" then
+                    set hits to every reminder whose name is rKey and completed is true
+                else
+                    set hits to every reminder whose name is rKey
+                end if
+                if (count of hits) is 0 then error "no such reminder: " & rKey number 9001
+                if (count of hits) > 1 then error "ambiguous: " & (count of hits) & " reminders named " & rKey number 9002
+                set r to item 1 of hits
+                set rid to id of r
+                if rAction is "complete" then
+                    set completed of r to true
+                else if rAction is "uncomplete" then
+                    set completed of r to false
+                else
+                    delete r
+                end if
+                return rid
+            end tell
+        end tell
+    end timeout
+end run
+''' % SCRIPT_TIMEOUT
+
+SCRIPT_PROBE = '''
+with timeout of 8 seconds
+    tell application "Reminders" to get count of lists
+end timeout
+'''
+
+
+class OsaError(Exception):
+    def __init__(self, code, message):
+        Exception.__init__(self, message)
+        self.code = code
+
+
+def osa(script, args=(), timeout=PROC_TIMEOUT):
+    """Run an AppleScript with argv, return stdout without the trailing newline."""
+    try:
+        p = subprocess.run(
+            [OSASCRIPT, "-"] + list(args),
+            input=script,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired:
+        raise OsaError(ERR_TIMEOUT, "osascript did not return within %ds" % timeout)
+    if p.returncode != 0:
+        err = p.stderr.strip()
+        m = re.search(r"\((-?\d+)\)\s*$", err)
+        raise OsaError(int(m.group(1)) if m else None, err)
+    out = p.stdout
+    if out.endswith("\n"):
+        out = out[:-1]
+    return out
+
+
+def app_responds():
+    try:
+        osa(SCRIPT_PROBE, timeout=15)
+        return True
+    except OsaError:
+        return False
+
+
+def restart_app(log):
+    """Reminders.app cold-launched from a headless session ignores Apple events; a restart fixes it."""
+    log("Reminders.app is not answering Apple events (-1712); restarting it")
+    subprocess.run(["/usr/bin/pkill", "-x", "Reminders"])
+    time.sleep(1.5)
+    subprocess.run(["/usr/bin/open", "-g", "-a", "Reminders"])
+    deadline = time.time() + 45
+    while time.time() < deadline:
+        time.sleep(2)
+        if app_responds():
+            log("Reminders.app is back")
+            return True
+    return False
+
+
+def run(script, args=(), log=lambda m: None, retry=True):
+    """osa() with the -1712 restart policy: restart Reminders.app, then retry once.
+
+    Pass retry=False for non-idempotent scripts (add): the app may have
+    committed the change before hanging, so a retry could duplicate it.
+    """
+    try:
+        return osa(script, args)
+    except OsaError as e:
+        if e.code != ERR_TIMEOUT:
+            raise
+        if not restart_app(log):
+            raise OsaError(ERR_TIMEOUT, "Reminders.app still not responding after restart")
+        if not retry:
+            raise OsaError(ERR_TIMEOUT, "Reminders.app hung; it was restarted but the change was not retried "
+                           "(it may or may not have been applied; check with show)")
+        return osa(script, args)
+
+
+def records(blob):
+    if blob == "":
+        return []
+    out = []
+    for rec in blob.split(RS):
+        rid, name, body, due, allday, pri, flagged, done = rec.split(US)
+        out.append({
+            "id": rid,
+            "name": name,
+            "body": body or None,
+            "due": due or None,
+            "allday_due": allday[:10] if allday else None,
+            "priority": int(pri),
+            "flagged": flagged == "true",
+            "completed": done == "true",
+        })
+    return out
+
+
+def parse_due(s):
+    """'YYYY-MM-DD' → all-day; 'YYYY-MM-DD HH:MM' or 'YYYY-MM-DDTHH:MM' → timed."""
+    s = s.strip()
+    for fmt, kind in (("%Y-%m-%d %H:%M", "time"), ("%Y-%m-%dT%H:%M", "time"), ("%Y-%m-%d", "day")):
+        try:
+            d = dt.datetime.strptime(s, fmt)
+        except ValueError:
+            continue
+        if kind == "day":
+            d = d.replace(hour=9, minute=0)  # Reminders' own default for all-day items
+        return kind, d
+    raise ValueError("due must be YYYY-MM-DD or 'YYYY-MM-DD HH:MM', got %r" % s)
+
+
+def fmt_due(r):
+    if r["due"] and not r["allday_due"]:
+        return r["due"][:16].replace("T", " ")
+    if r["allday_due"]:
+        return r["allday_due"]
+    if r["due"]:
+        return r["due"][:16].replace("T", " ")
+    return ""
+
+
+def print_reminders(rs):
+    for r in rs:
+        box = "☑" if r["completed"] else "☐"
+        flag = " ⚑" if r["flagged"] else ""
+        pri = {1: " !!!", 5: " !!", 9: " !"}.get(r["priority"], "")
+        due = fmt_due(r)
+        line = "%s %s%s%s" % (box, r["name"], pri, flag)
+        if due:
+            line += "  (%s)" % due
+        print(line)
+        if r["body"]:
+            for bl in r["body"].splitlines():
+                print("    %s" % bl)
+        print("    %s" % r["id"])
+
+
+def main(argv):
+    # --json is accepted anywhere ("--json show L" and "show L --json" both work)
+    want_json = "--json" in argv
+    argv = [x for x in argv if x != "--json"]
+    ap = argparse.ArgumentParser(prog="tikk-reminders", description=__doc__.splitlines()[0])
+    ap.add_argument("--json", action="store_true", help="machine-readable output")
+    sub = ap.add_subparsers(dest="verb", required=True)
+
+    sub.add_parser("lists", help="names of all reminder lists")
+    sub.add_parser("check", help="verify Reminders.app answers and the Automation grant is in place")
+
+    p = sub.add_parser("show", help="reminders in a list (open ones by default)")
+    p.add_argument("list")
+    g = p.add_mutually_exclusive_group()
+    g.add_argument("--all", action="store_true", help="include completed reminders")
+    g.add_argument("--done", action="store_true", help="only completed reminders")
+
+    p = sub.add_parser("add", help="create a reminder; prints its id")
+    p.add_argument("list")
+    p.add_argument("name")
+    p.add_argument("--body", default="")
+    p.add_argument("--due", help="YYYY-MM-DD (all-day) or 'YYYY-MM-DD HH:MM'")
+    p.add_argument("--priority", type=int, default=0, choices=[0, 1, 5, 9],
+                   help="0 none, 1 high, 5 medium, 9 low (Reminders' own scale)")
+
+    for verb, scope in (("complete", "open"), ("uncomplete", "done"), ("delete", "all")):
+        p = sub.add_parser(verb, help="%s a reminder by id (x-apple-reminder://…) or exact name" % verb)
+        p.add_argument("list")
+        p.add_argument("key")
+        p.set_defaults(scope=scope)
+
+    a = ap.parse_args(argv)
+    a.json = want_json
+    log = (lambda m: sys.stderr.write("tikk: %s\n" % m))
+    emit = (lambda obj: print(json.dumps(obj, ensure_ascii=False)))
+
+    try:
+        if a.verb == "lists":
+            names = [n for n in run(SCRIPT_LISTS, log=log).split(RS) if n != ""]
+            emit(names) if a.json else print("\n".join(names))
+
+        elif a.verb == "check":
+            t0 = time.time()
+            n = int(run(SCRIPT_PROBE, log=log))
+            ms = int((time.time() - t0) * 1000)
+            info = {"ok": True, "lists": n, "ms": ms, "backend": "applescript"}
+            emit(info) if a.json else print("ok: Reminders.app answered in %d ms, %d lists" % (ms, n))
+
+        elif a.verb == "show":
+            mode = "done" if a.done else ("all" if a.all else "open")
+            rs = records(run(SCRIPT_SHOW, [a.list, mode], log=log))
+            emit(rs) if a.json else print_reminders(rs)
+
+        elif a.verb == "add":
+            kind, d = ("none", dt.datetime(2000, 1, 1)) if not a.due else parse_due(a.due)
+            args = [a.list, a.name, a.body, kind] + [str(x) for x in (d.year, d.month, d.day, d.hour, d.minute)] + [str(a.priority)]
+            rid = run(SCRIPT_ADD, args, log=log, retry=False)
+            emit({"id": rid}) if a.json else print(rid)
+
+        else:  # complete / uncomplete / delete
+            rid = run(SCRIPT_MUTATE, [a.list, a.key, a.scope, a.verb], log=log)
+            emit({"id": rid, a.verb + "d": True}) if a.json else print(rid)
+
+    except ValueError as e:
+        log(str(e))
+        return EX_USAGE
+    except OsaError as e:
+        if e.code == ERR_NOPERM:
+            log("not authorized to control Reminders.app (-1743). On the Mac: System Settings → "
+                "Privacy & Security → Automation → sshd-keygen-wrapper → enable Reminders")
+            return EX_NOPERM
+        if e.code == ERR_TIMEOUT:
+            log(str(e))
+            return EX_TEMPFAIL
+        if e.code == ERR_NOSUCH:
+            log("no such list (or Reminders could not resolve it): %s" % str(e))
+            return EX_NOINPUT
+        if e.code in (ERR_NOT_FOUND, ERR_AMBIGUOUS):
+            log(re.sub(r"^.*?execution error:\s*", "", str(e)))
+            return EX_NOINPUT if e.code == ERR_NOT_FOUND else EX_DATAERR
+        log(str(e))
+        return EX_UNAVAILABLE
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
