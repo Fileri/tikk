@@ -18,7 +18,7 @@ out of scope.
 
 ## Status
 
-Gateway side done and measured; Linux client in progress.
+Gateway done and measured. Omarchy plugin: first working version (pill + panel, one list); no separate app window yet.
 
 | Verb | Latency (Mac mini M2, macOS 26.6) |
 |---|---|
@@ -97,3 +97,39 @@ dead end and a fallback.
 ## License
 
 MIT.
+
+## Omarchy plugin (the Linux box)
+
+`plugin/` is an Omarchy shell plugin: a bar pill with the number of open
+reminders in one list, and a keyboard-driven panel to tick them off and add
+new ones. It talks to the Mac through `bridge/linux/tikk-shim`.
+
+1. Install the shim: `install -m 755 bridge/linux/tikk-shim ~/.local/bin/tikk`
+   and write `~/.config/tikk/bridge.conf`:
+
+   ```
+   host = user@mac-hostname-or-ip
+   key  = ~/.ssh/tikk_ed25519
+   ```
+
+   `tikk check` should now answer from the Mac.
+2. Install the plugin: `omarchy plugin add <this repo url>` once it is on
+   main; until then, copy `plugin/` to `~/.config/omarchy/plugins/fileri.tikk/`.
+3. Put it on the bar: add `{ "id": "fileri.tikk", "list": "Groceries" }` to
+   `bar.layout.right` in `~/.config/omarchy/shell.json`, then
+   `omarchy-restart-shell`. Leave `list` empty to take the first list the Mac
+   reports.
+
+Panel keys: Up/Down or j/k move, Enter or click ticks off, Delete deletes,
+`a` or `/` jumps to the add field, Tab cycles lists, Esc closes.
+The pill dims when the Mac is unreachable. Polling is every 30 s; every
+action re-polls immediately. Writes only ever happen on your keypress.
+
+IPC for keybinds and scripts:
+
+```
+omarchy-shell ipc call fileri.tikk toggle
+omarchy-shell ipc call fileri.tikk add "Oat milk"
+omarchy-shell ipc call fileri.tikk complete "Oat milk"
+omarchy-shell ipc call fileri.tikk status
+```

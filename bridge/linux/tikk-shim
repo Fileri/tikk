@@ -1,0 +1,54 @@
+#!/usr/bin/env bash
+# tikk-shim — the Linux side of tikk's Mac gateway. Install as `tikk` on PATH.
+#
+#   tikk lists | show <list> [--json] | add <list> <name> [...] | complete ... | delete ... | check | ping
+#
+# Every verb is executed on the Mac by tikk-dispatch over ssh. Config is
+# ~/.config/tikk/bridge.conf, key=value, parsed not sourced:
+#   host = [user@]mac-hostname-or-ip        (required)
+#   key  = path to the dedicated identity   (default ~/.ssh/tikk_ed25519)
+#
+# The dedicated key gets its own ControlMaster socket: sharing a general key's
+# master would silently bypass the forced command. Modelled on blip-shim.
+set -euo pipefail
+
+CONF="${TIKK_BRIDGE_CONF:-$HOME/.config/tikk/bridge.conf}"
+host=""; key="$HOME/.ssh/tikk_ed25519"
+if [[ -r "$CONF" ]]; then
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    line="${line%%#*}"; line="${line//[[:space:]]/}"
+    [[ "$line" == *=* ]] || continue
+    k="${line%%=*}"; v="${line#*=}"
+    v="${v#\"}"; v="${v%\"}"; v="${v#\'}"; v="${v%\'}"
+    case "$k" in
+      host) host="$v" ;;
+      key) key="${v/#\~/$HOME}" ;;
+    esac
+  done < "$CONF"
+fi
+host="${TIKK_MAC_HOST:-$host}"
+if [[ -z "$host" ]]; then
+  echo "tikk: no Mac configured — set host= in $CONF" >&2; exit 78   # EX_CONFIG
+fi
+if ! [[ "$host" =~ ^([A-Za-z0-9._-]+@)?[A-Za-z0-9._:-]+$ ]]; then
+  echo "tikk: refusing host '$host' — expected [user@]hostname" >&2; exit 78
+fi
+if ! [[ -r "$key" ]]; then
+  echo "tikk: key $key not readable — ssh-keygen -t ed25519 -f $key -N '' and enroll it on the Mac" >&2; exit 78
+fi
+if [[ $# -eq 0 ]]; then
+  echo "usage: tikk <verb> [args]   verbs: ping check lists show add complete uncomplete delete" >&2; exit 64
+fi
+
+ssh=(ssh -F /dev/null -i "$key" -o IdentitiesOnly=yes -o BatchMode=yes
+     -o ControlMaster=auto -o "ControlPath=$HOME/.ssh/cm-tikk-%r@%h:%p" -o ControlPersist=10m
+     -o ConnectTimeout=5 -o StrictHostKeyChecking=accept-new)
+
+# `ssh -n` for the probe: a bare probe would eat stdin.
+if ! err="$("${ssh[@]}" -n -- "$host" ping 2>&1 >/dev/null)"; then
+  echo "tikk: $host unreachable — the gateway is offline.${err:+ ($(printf '%s' "$err" | tail -n1))}" >&2
+  exit 69   # EX_UNAVAILABLE (the widget dims on this code)
+fi
+
+# ${*@Q} quotes each argument for the remote side; tikk-dispatch shlex-splits it.
+exec "${ssh[@]}" -- "$host" "${*@Q}"
