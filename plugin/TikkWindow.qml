@@ -22,6 +22,7 @@ import qs.Ui
 //   Space             tick (list)
 //   1 2 3             Today, Scheduled, All · 4…9 your lists in sidebar order (also Alt+digit)
 //   n  new reminder · c  show/hide completed · g/G  top/bottom · r  refresh · Esc  unwind, then close
+//   in the new-reminder field: ↑ (or ← when empty) back to the list, Tab onward, Enter adds
 // Every visual token comes from the shell theme; no literal colours here.
 FloatingWindow {
   id: win
@@ -235,6 +236,12 @@ FloatingWindow {
   function submitNew() {
     var t = newField.text; newField.text = ""
     if (t.trim() !== "" && host) host.add(t, targetList)
+  }
+  function leaveFieldToList() {
+    if (rows.length === 0) { syncSideCursor(); focusRegion("sidebar"); return }
+    cursor = rows.length - 1
+    mainList.positionViewAtIndex(cursor, ListView.Contain)
+    focusRegion("list")
   }
   function unwind() {
     if (region === "new") { newField.text = ""; focusRegion("list"); return }
@@ -619,6 +626,11 @@ FloatingWindow {
               Keys.onEscapePressed: win.unwind()
               Keys.onTabPressed: win.cycleRegion(1)
               Keys.onBacktabPressed: win.cycleRegion(-1)
+              // Up leaves the field for the list (the list is above it, and a
+              // one-line field has no use for Up). Left does the same only when
+              // the field is empty, so it never steals caret movement from editing.
+              Keys.onUpPressed: win.leaveFieldToList()
+              Keys.onLeftPressed: function(e) { if (text === "") win.leaveFieldToList(); else e.accepted = false }
             }
           }
           Text {
