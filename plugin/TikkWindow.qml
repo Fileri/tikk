@@ -14,6 +14,7 @@ import qs.Ui
 // widget's poller and write queue. `hostWidget` is injected by BarWidget.
 //
 // Keyboard model (the platform convention: Tab between regions, arrows within):
+//   opens with focus in the sidebar on the current selection
 //   Tab / Shift+Tab   focus sidebar → list → new-reminder field → sidebar
 //   ↑ ↓  (j k)        move within the focused region
 //   ← →  (h l)        list ⇄ sidebar; on a group header: fold / unfold
@@ -238,7 +239,9 @@ FloatingWindow {
     if (region === "new") { newField.text = ""; focusRegion("list"); return }
     win.visible = false
   }
-  onVisibleChanged: if (visible) { if (listName === "" && host) listName = host.list; syncSideCursor(); Qt.callLater(function() { focusRegion("list") }) }
+  // Open with focus in the sidebar, on the current selection: arrows browse
+  // lists immediately, Enter or → goes in. Same whether the list is empty or not.
+  onVisibleChanged: if (visible) { if (listName === "" && host) listName = host.list; syncSideCursor(); Qt.callLater(function() { syncSideCursor(); focusRegion("sidebar") }) }
 
   // ------------------------------------------------------------ keys
   FocusScope {
