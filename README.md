@@ -61,8 +61,10 @@ Requirements: macOS with Reminders signed into iCloud, Remote Login on,
 [reminders-cli](https://github.com/keith/reminders-cli)
 (`brew install keith/formulae/reminders-cli`), Python 3 (Xcode CLT is enough).
 
-Copy `gateway/tikk-dispatch` and `gateway/tikk-reminders` to `~/.tikk/bin/`
-on the Mac and make them executable.
+On the Mac, from a checkout of this repo, `sh gateway/install.sh` copies
+`tikk-dispatch` and `tikk-reminders` to `~/.tikk/bin/` and prints the
+`authorized_keys` line for the next step. (By hand: copy the two files there
+and make them executable.)
 
 On the Linux box, make a dedicated key and enroll it on the Mac, confined to
 the dispatcher and to your Linux box's address:
@@ -152,12 +154,19 @@ list of lists and everything else still works.
 ## Security model
 
 - The Linux box holds one key that can only run the verbs above: no shell,
-  no file transfer, no forwarding. Anything else is refused with exit 64.
+  no file transfer, no forwarding. Anything else is refused with exit 64 and
+  logged.
 - `tikk-dispatch` splits the command with shell quoting rules and `exec`s
-  the verb tool directly; no shell is ever involved on the Mac.
-- The verb tool finds `reminders` in fixed locations and runs with a fixed
-  system `PATH`.
+  the verb tool directly; no shell is ever involved on the Mac. reminders-cli
+  is always called with data after a literal `--`, so names can never become
+  flags.
+- Optional `~/.tikk/config` on the Mac: `allow_lists = A, B` scopes the key
+  to named lists; `audit_log` (on by default) records every write, failed
+  write and refused command with the client's address.
 - Nothing about your reminders is stored on the Linux side.
+
+The full model, the audit format, the JSON contract and the exit codes are in
+[docs/gateway.md](docs/gateway.md). Tests: `python3 -m unittest discover gateway/tests`.
 
 ## Why EventKit and not AppleScript
 
