@@ -1,0 +1,33 @@
+{
+  "schemaVersion": 1,
+  "id": "fileri.tikk",
+  "name": "tikk",
+  "version": "0.1.0",
+  "author": "Erik Fillipsveen",
+  "license": "MIT",
+  "description": "Apple Reminders in the Omarchy bar, through a confined SSH key to a Mac you own. Pill with the open count of one list, a keyboard panel to tick and add, and a window laid out like Reminders.app.",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "plugin/BarWidget.qml"
+  },
+  "barWidget": {
+    "displayName": "tikk",
+    "description": "Open reminders in your list. Dimmed = the Mac gateway is unreachable. Left-click = panel, middle-click = refresh.",
+    "category": "Info",
+    "allowMultiple": false,
+    "defaultSection": "right",
+    "defaults": {
+      "list": ""
+    },
+    "schema": [
+      {
+        "key": "list",
+        "type": "string",
+        "label": "Reminders list",
+        "description": "Name of the list to show (empty = the first list the Mac reports)"
+      }
+    ]
+  }
+}
