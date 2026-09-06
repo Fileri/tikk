@@ -1,10 +1,18 @@
 #!/usr/bin/env python3
 """tikk-reminders — the verbs behind tikk's SSH gateway (EventKit backend).
 
-Runs on the Mac, called by tikk-dispatch. Talks to Reminders through
-`reminders` (keith/reminders-cli, `brew install keith/formulae/reminders-cli`),
-which uses EventKit directly: no Reminders.app involvement, every verb answers
-in well under a second, and shared lists work.
+Runs on the Mac, invoked by tikk-dispatch with the verb and its arguments.
+Talks to Reminders through `reminders` (keith/reminders-cli), which uses
+EventKit directly: no Reminders.app involvement, every verb answers in well
+under a second, and shared lists work.
+
+Layout of this file
+  1. constants, exit codes, errors
+  2. gateway config (~/.tikk/config), audit log, list allowlist
+  3. list metadata from Reminders' own store (groups, colours, emblems)
+  4. the reminders-cli backend and record normalisation
+  5. one function per verb
+  6. argument parsing and main
 
 Permission: the ssh session's TCC identity needs the *Reminders* grant. On
 current macOS that grant appears together with the Automation → Reminders
@@ -15,7 +23,8 @@ prompt shows on the Mac's screen; click Allow there or via Screen Sharing).
 Output: plain text for humans, `--json` for clients. Dates are converted to
 the Mac's local time zone; a due date at local midnight is reported as all-day.
 
-Python 3.9 compatible (that is what ships with Xcode CLT).
+Python 3.9 compatible (that is what ships with Xcode CLT). No dependencies
+beyond the standard library and reminders-cli.
 """
 import argparse
 import datetime as dt
@@ -27,34 +36,49 @@ import sqlite3
 import subprocess
 import sys
 import time
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
+VERSION = "0.2.0"
+
+# ----------------------------------------------------------------- 1. constants
 # Looked up in this order; nothing user-writable earlier than the tool itself.
 CANDIDATES = [
     os.path.join(os.path.dirname(os.path.realpath(__file__)), "reminders"),
     "/opt/homebrew/bin/reminders",
     "/usr/local/bin/reminders",
 ]
-PROC_TIMEOUT = 30
+PROC_TIMEOUT = 30                         # seconds for one reminders-cli call
 CONFIG_PATH = os.path.expanduser("~/.tikk/config")
 DEFAULT_AUDIT = os.path.expanduser("~/.tikk/audit.log")
+STORE_GLOB = os.path.expanduser(
+    "~/Library/Group Containers/group.com.apple.reminders/Container_v1/Stores/Data-*.sqlite")
 
-# sysexits.h
+# sysexits.h — the exit code is the contract with the client
 EX_USAGE, EX_DATAERR, EX_NOINPUT, EX_UNAVAILABLE, EX_NOPERM, EX_CONFIG = 64, 65, 66, 69, 77, 78
 
-PRIORITY_NAMES = {0: "none", 1: "high", 5: "medium", 9: "low"}
+PRIORITY_NAMES = {0: "none", 1: "high", 5: "medium", 9: "low"}   # Reminders' own scale
+WRITE_VERBS = ("add", "complete", "uncomplete", "delete")
+ID_PREFIX = "x-apple-reminder://"
+
+Record = Dict[str, Any]
 
 
 class ToolError(Exception):
-    def __init__(self, code, message):
+    """A failure with a sysexits code; main() turns it into stderr + exit status."""
+
+    def __init__(self, code: int, message: str):
         Exception.__init__(self, message)
         self.code = code
 
 
-# ---- gateway config: ~/.tikk/config, key = value, parsed not sourced.
-#   allow_lists = Groceries, Household   # the key may only see/touch these (default: all)
-#   audit_log   = ~/.tikk/audit.log      # every write and every refusal (default); "off" disables
-def read_config(path=CONFIG_PATH):
-    cfg = {"allow_lists": None, "audit_log": DEFAULT_AUDIT}
+# ---------------------------------------------------- 2. config, audit, allowlist
+def read_config(path: str = CONFIG_PATH) -> Dict[str, Any]:
+    """~/.tikk/config, `key = value`, parsed not sourced. Unknown keys are ignored.
+
+      allow_lists = Groceries, Household   # the key may only see/touch these (default: all)
+      audit_log   = ~/.tikk/audit.log      # writes, failed writes, refusals (default); "off" disables
+    """
+    cfg: Dict[str, Any] = {"allow_lists": None, "audit_log": DEFAULT_AUDIT}
     try:
         with open(path, encoding="utf-8") as f:
             lines = f.read().splitlines()
@@ -64,26 +88,27 @@ def read_config(path=CONFIG_PATH):
         line = line.split("#", 1)[0].strip()
         if "=" not in line:
             continue
-        k, v = (x.strip() for x in line.split("=", 1))
-        if k == "allow_lists":
-            names = [n.strip() for n in v.split(",") if n.strip()]
+        key, value = (x.strip() for x in line.split("=", 1))
+        if key == "allow_lists":
+            names = [n.strip() for n in value.split(",") if n.strip()]
             cfg["allow_lists"] = names or None
-        elif k == "audit_log":
-            cfg["audit_log"] = None if v.lower() in ("off", "no", "false", "") else os.path.expanduser(v)
+        elif key == "audit_log":
+            cfg["audit_log"] = None if value.lower() in ("off", "no", "false", "") else os.path.expanduser(value)
     return cfg
 
 
-def audit(cfg, event, **fields):
-    """Append one line to the audit log (0600). Never raises: logging must not break a verb."""
+def client_address() -> str:
+    return (os.environ.get("SSH_CLIENT") or os.environ.get("SSH_CONNECTION") or "local").split()[0]
+
+
+def audit(cfg: Dict[str, Any], event: str, **fields: Any) -> None:
+    """Append one line to the audit log (created 0600). Never raises: logging must not break a verb."""
     path = cfg.get("audit_log")
     if not path:
         return
-    client = (os.environ.get("SSH_CLIENT") or os.environ.get("SSH_CONNECTION") or "local").split()[0]
-    parts = [dt.datetime.now().astimezone().isoformat(timespec="seconds"), "client=" + client, "event=" + event]
-    for k, v in fields.items():
-        if v is None:
-            continue
-        parts.append("%s=%s" % (k, json.dumps(str(v), ensure_ascii=False)))
+    parts = [dt.datetime.now().astimezone().isoformat(timespec="seconds"),
+             "client=" + client_address(), "event=" + event]
+    parts += ["%s=%s" % (k, json.dumps(str(v), ensure_ascii=False)) for k, v in fields.items() if v is not None]
     try:
         os.makedirs(os.path.dirname(path), mode=0o700, exist_ok=True)
         fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
@@ -93,54 +118,52 @@ def audit(cfg, event, **fields):
         pass
 
 
-def allowed(cfg, list_name):
+def allowed(cfg: Dict[str, Any], list_name: str) -> bool:
     return cfg["allow_lists"] is None or list_name in cfg["allow_lists"]
 
 
-def require_allowed(cfg, list_name):
+def require_allowed(cfg: Dict[str, Any], list_name: str) -> None:
     if not allowed(cfg, list_name):
         raise ToolError(EX_NOPERM, "list %r is not in allow_lists on the gateway" % list_name)
 
 
-# ---- list metadata EventKit does not expose: groups, colours, emblems, sharing.
-# Read straight from Reminders' Core Data store, opened read-only in place
-# (`mode=ro`: sqlite takes a shared lock and reads the WAL, so the data is
-# current and nothing is written). If that fails we retry with `immutable=1`,
-# which reads the main file without locks and may lag behind the WAL. Needs
-# Full Disk Access for the ssh session; without it, or if Apple changes the
-# schema, we return {} and the client shows a flat list.
-STORE_GLOB = os.path.expanduser("~/Library/Group Containers/group.com.apple.reminders/Container_v1/Stores/Data-*.sqlite")
+# ------------------------------------------- 3. list metadata from the store
+# EventKit does not expose Reminders.app's list groups, colours, emblems or
+# sharing. Reminders' Core Data store does. It is opened read-only in place
+# (`mode=ro`: a shared lock, the WAL is read, nothing is written); if that
+# fails we retry with `immutable=1`, which needs no lock and may lag the WAL.
+# Needs Full Disk Access for the ssh session; without it, or if Apple changes
+# the schema, we return nothing and the client shows a flat list.
+STORE_QUERY = ("select Z_PK, ZISGROUP, ZNAME, ZPARENTLIST, ZDADISPLAYORDER, ZBADGEEMBLEM, ZSHARINGSTATUS, ZCOLOR "
+               "from ZREMCDBASELIST where ZMARKEDFORDELETION=0 and ZNAME is not null and ZISGROUP is not null")
 
 
-def plist_color(blob):
-    """ZCOLOR is an NSKeyedArchiver plist holding red/green/blue floats; → '#rrggbb' or None."""
+def plist_color(blob: bytes) -> Optional[str]:
+    """ZCOLOR is an NSKeyedArchiver plist holding red/green/blue floats → '#rrggbb'."""
     try:
-        for o in plistlib.loads(blob).get("$objects", []):
-            if isinstance(o, dict) and all(k in o for k in ("red", "green", "blue")):
-                return "#%02x%02x%02x" % tuple(int(round(max(0.0, min(1.0, float(o[k]))) * 255)) for k in ("red", "green", "blue"))
+        for obj in plistlib.loads(blob).get("$objects", []):
+            if isinstance(obj, dict) and all(k in obj for k in ("red", "green", "blue")):
+                rgb = tuple(int(round(max(0.0, min(1.0, float(obj[k]))) * 255)) for k in ("red", "green", "blue"))
+                return "#%02x%02x%02x" % rgb
     except Exception:
         pass
     return None
 
 
-def emblem_of(raw):
-    """ZBADGEEMBLEM is either a symbolic name ('shopping1', 'default') or JSON {"Emoji": "💪"}."""
+def emblem_of(raw: Optional[str]) -> Optional[str]:
+    """ZBADGEEMBLEM is a symbolic name ('shopping1', 'default') or JSON {"Emoji": "💪"} → emoji or name."""
     if not raw:
         return None
     try:
-        j = json.loads(raw)
-        if isinstance(j, dict) and j.get("Emoji"):
-            return j["Emoji"]
+        parsed = json.loads(raw)
+        if isinstance(parsed, dict) and parsed.get("Emoji"):
+            return str(parsed["Emoji"])
     except ValueError:
         pass
     return str(raw)
 
 
-STORE_QUERY = ("select Z_PK, ZISGROUP, ZNAME, ZPARENTLIST, ZDADISPLAYORDER, ZBADGEEMBLEM, ZSHARINGSTATUS, ZCOLOR "
-               "from ZREMCDBASELIST where ZMARKEDFORDELETION=0 and ZNAME is not null and ZISGROUP is not null")
-
-
-def store_rows(store):
+def store_rows(store: str) -> List[Tuple]:
     for params in ("mode=ro", "mode=ro&immutable=1"):
         try:
             con = sqlite3.connect("file:%s?%s" % (store, params), uri=True, timeout=1.0)
@@ -153,10 +176,10 @@ def store_rows(store):
     return []
 
 
-def store_meta():
+def store_meta(stores: Optional[Iterable[str]] = None) -> Dict[str, Any]:
     """→ {"lists": {name: {group, color, emblem, shared, order}}, "groups": [{name, order}]}"""
-    meta = {"lists": {}, "groups": []}
-    for store in sorted(glob.glob(STORE_GLOB)):
+    meta: Dict[str, Any] = {"lists": {}, "groups": []}
+    for store in sorted(stores if stores is not None else glob.glob(STORE_GLOB)):
         rows = store_rows(store)
         by_pk = {r[0]: r for r in rows}
         for pk, isgroup, name, parent, order, emblem, shared, color in rows:
@@ -174,42 +197,50 @@ def store_meta():
     return meta
 
 
-def find_tool():
-    for c in CANDIDATES:
-        if os.access(c, os.X_OK):
-            return c
+# -------------------------------------------------- 4. reminders-cli backend
+def find_tool() -> str:
+    for candidate in CANDIDATES:
+        if os.access(candidate, os.X_OK):
+            return candidate
     raise ToolError(EX_CONFIG, "reminders-cli not found (looked in %s); brew install keith/formulae/reminders-cli"
                     % ", ".join(CANDIDATES))
 
 
-def rem(subcommand, options=(), positionals=()):
-    """Run one reminders-cli subcommand; return stdout. Maps its failure modes to exit codes.
+# Substrings of reminders-cli's messages → our exit code. Checked in order.
+BACKEND_ERRORS = (
+    (("grant", "access"), EX_NOPERM),
+    (("no reminders list matching",), EX_NOINPUT),
+    (("no reminder at index",), EX_NOINPUT),
+)
 
-    Options go first and positionals after a literal "--", so a list or
-    reminder called "--format" or "-h" is data, never a flag. Option values
-    use the --name=value form for the same reason.
+
+def rem(subcommand: str, options: Sequence[str] = (), positionals: Sequence[str] = ()) -> str:
+    """Run one reminders-cli subcommand and return its stdout.
+
+    Options go first (always --name=value) and positionals after a literal
+    "--", so a list or reminder called "--format" or "-h" is data, never a
+    flag. stdin is closed; output is decoded as UTF-8 with replacement.
     """
     cmd = [find_tool(), subcommand] + list(options) + ["--"] + list(positionals)
     try:
-        p = subprocess.run(cmd, stdin=subprocess.DEVNULL, capture_output=True,
-                           encoding="utf-8", errors="replace", timeout=PROC_TIMEOUT)
+        proc = subprocess.run(cmd, stdin=subprocess.DEVNULL, capture_output=True,
+                              encoding="utf-8", errors="replace", timeout=PROC_TIMEOUT)
     except subprocess.TimeoutExpired:
         raise ToolError(EX_UNAVAILABLE, "reminders-cli did not return within %ds" % PROC_TIMEOUT)
-    if p.returncode == 0:
-        return p.stdout
-    err = (p.stderr or p.stdout).strip()
+    if proc.returncode == 0:
+        return proc.stdout
+    err = (proc.stderr or proc.stdout).strip()
     low = err.lower()
-    if "grant" in low and "access" in low:
-        raise ToolError(EX_NOPERM, "no Reminders access for this session: %s. Trigger the grant once with an "
-                        "osascript call to Reminders from the same ssh session and click Allow on the Mac" % err)
-    if "no reminders list matching" in low:
-        raise ToolError(EX_NOINPUT, err)
-    if "no reminder at index" in low:
-        raise ToolError(EX_NOINPUT, err)
-    raise ToolError(EX_UNAVAILABLE, err or "reminders-cli failed with exit %d" % p.returncode)
+    for needles, code in BACKEND_ERRORS:
+        if all(n in low for n in needles):
+            if code == EX_NOPERM:
+                err += (". Trigger the grant once with an osascript call to Reminders from the same "
+                        "ssh session and click Allow on the Mac")
+            raise ToolError(code, err)
+    raise ToolError(EX_UNAVAILABLE, err or "reminders-cli failed with exit %d" % proc.returncode)
 
 
-def rem_json(subcommand, options=(), positionals=()):
+def rem_json(subcommand: str, options: Sequence[str] = (), positionals: Sequence[str] = ()) -> Any:
     out = rem(subcommand, list(options) + ["--format=json"], positionals)
     try:
         return json.loads(out)
@@ -217,19 +248,20 @@ def rem_json(subcommand, options=(), positionals=()):
         raise ToolError(EX_UNAVAILABLE, "reminders-cli returned non-JSON output")
 
 
-def local_iso(utc_iso):
-    """'2026-09-10T16:00:00Z' → ('2026-09-10T18:00:00+02:00', allday?) in the Mac's zone.
+def local_iso(utc_iso: Optional[str]) -> Tuple[Optional[str], bool]:
+    """'2026-09-10T16:00:00Z' → ('2026-09-10T18:00:00+02:00', is_allday) in the Mac's zone.
 
-    Tolerates fractional seconds and a numeric offset; anything unparseable
-    comes back as (None, False) rather than failing the whole verb.
+    Tolerates fractional seconds and numeric offsets; anything unparseable is
+    (None, False) rather than a failed verb. All-day = local midnight, which is
+    how EventKit represents date-only due dates.
     """
     if not utc_iso:
         return None, False
-    s = str(utc_iso).strip()
-    if s.endswith("Z"):
-        s = s[:-1] + "+00:00"
+    text = str(utc_iso).strip()
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
     try:
-        d = dt.datetime.fromisoformat(s)
+        d = dt.datetime.fromisoformat(text)
     except ValueError:
         return None, False
     if d.tzinfo is None:
@@ -238,88 +270,186 @@ def local_iso(utc_iso):
     return d.isoformat(timespec="seconds"), (d.hour, d.minute, d.second) == (0, 0, 0)
 
 
-def normalize(r):
-    if not isinstance(r, dict) or "externalId" not in r or "title" not in r:
+def normalize(raw: Any) -> Record:
+    """reminders-cli's JSON → tikk's stable record shape."""
+    if not isinstance(raw, dict) or "externalId" not in raw or "title" not in raw:
         raise ToolError(EX_UNAVAILABLE, "reminders-cli returned a record without externalId/title")
-    due, allday = local_iso(r.get("dueDate"))
-    done, _ = local_iso(r.get("completionDate"))
+    due, allday = local_iso(raw.get("dueDate"))
+    done, _ = local_iso(raw.get("completionDate"))
     return {
-        "id": r["externalId"],
-        "name": r["title"],
-        "body": r.get("notes") or None,
+        "id": raw["externalId"],
+        "name": raw["title"],
+        "body": raw.get("notes") or None,
         "due": due,
         "allday": allday,
-        "priority": r.get("priority", 0),
-        "completed": bool(r.get("isCompleted")),
+        "priority": int(raw.get("priority") or 0),
+        "completed": bool(raw.get("isCompleted")),
         "completed_at": done,
-        "list": r.get("list"),
+        "list": raw.get("list"),
     }
 
 
-def fetch(list_name, mode):
+def list_names() -> List[str]:
+    return [n for n in rem("show-lists").splitlines() if n]
+
+
+def fetch(list_name: str, mode: str) -> List[Record]:
+    """Reminders in one list: mode 'open' (default), 'done', or 'all'."""
     flags = {"open": [], "done": ["--only-completed"], "all": ["--include-completed"]}[mode]
     return [normalize(r) for r in rem_json("show", flags, [list_name])]
 
 
-def resolve(list_name, key, mode):
-    """Accept an id (UUID or x-apple-reminder://UUID) or an exact name; return the matching record."""
-    if key.startswith("x-apple-reminder://"):
-        key = key[len("x-apple-reminder://"):]
-    rs = fetch(list_name, mode)
-    what = "" if mode == "all" else mode + " "
-    if len(key) == 36 and key.count("-") == 4:
-        hits = [r for r in rs if r["id"].upper() == key.upper()]
+def looks_like_id(key: str) -> bool:
+    return len(key) == 36 and key.count("-") == 4
+
+
+def resolve(list_name: str, key: str, mode: str) -> Record:
+    """Find one reminder by id (UUID, with or without x-apple-reminder://) or exact name.
+
+    Names are matched among 'open', 'done' or 'all' reminders depending on the
+    verb; an ambiguous name is refused so a keypress never hits the wrong item.
+    """
+    if key.startswith(ID_PREFIX):
+        key = key[len(ID_PREFIX):]
+    records = fetch(list_name, mode)
+    scope = "" if mode == "all" else mode + " "
+    if looks_like_id(key):
+        hits = [r for r in records if r["id"].upper() == key.upper()]
         if not hits:
-            raise ToolError(EX_NOINPUT, "no %sreminder with id %s in %s" % (what, key, list_name))
+            raise ToolError(EX_NOINPUT, "no %sreminder with id %s in %s" % (scope, key, list_name))
         return hits[0]
-    hits = [r for r in rs if r["name"] == key]
+    hits = [r for r in records if r["name"] == key]
     if not hits:
-        raise ToolError(EX_NOINPUT, "no %sreminder named %r in %s" % (what, key, list_name))
+        raise ToolError(EX_NOINPUT, "no %sreminder named %r in %s" % (scope, key, list_name))
     if len(hits) > 1:
         raise ToolError(EX_DATAERR, "ambiguous: %d reminders named %r in %s; use the id" % (len(hits), key, list_name))
     return hits[0]
 
 
-def parse_due(s):
-    """Validate 'YYYY-MM-DD' or 'YYYY-MM-DD HH:MM' and hand reminders-cli the same string."""
-    s = s.strip().replace("T", " ")
+def parse_due(text: str) -> str:
+    """Accept 'YYYY-MM-DD' (all-day) or 'YYYY-MM-DD HH:MM'; return the string reminders-cli takes."""
+    text = text.strip().replace("T", " ")
     for fmt in ("%Y-%m-%d %H:%M", "%Y-%m-%d"):
         try:
-            dt.datetime.strptime(s, fmt)
-            return s
+            dt.datetime.strptime(text, fmt)
+            return text
         except ValueError:
             continue
-    raise ValueError("due must be YYYY-MM-DD or 'YYYY-MM-DD HH:MM', got %r" % s)
+    raise ToolError(EX_USAGE, "due must be YYYY-MM-DD or 'YYYY-MM-DD HH:MM', got %r" % text)
 
 
-def print_reminders(rs):
-    for r in rs:
+# --------------------------------------------------------------- 5. the verbs
+def format_reminders(records: List[Record]) -> str:
+    lines = []
+    for r in records:
         box = "☑" if r["completed"] else "☐"
         pri = {1: " !!!", 5: " !!", 9: " !"}.get(r["priority"], "")
         line = "%s %s%s" % (box, r["name"], pri)
         if r["due"]:
             line += "  (%s)" % (r["due"][:10] if r["allday"] else r["due"][:16].replace("T", " "))
-        print(line)
+        lines.append(line)
         if r["body"]:
-            for bl in r["body"].splitlines():
-                print("    %s" % bl)
-        print("    %s" % r["id"])
+            lines += ["    " + bl for bl in r["body"].splitlines()]
+        lines.append("    " + r["id"])
+    return "\n".join(lines)
 
 
+def verb_lists(a, cfg) -> Tuple[Any, str]:
+    names = [n for n in list_names() if allowed(cfg, n)]
+    return names, "\n".join(names)
+
+
+def verb_snapshot(a, cfg) -> Tuple[Any, str]:
+    """Every allowed list with its open count, groups, and every open reminder — one round trip."""
+    names = [n for n in list_names() if allowed(cfg, n)]
+    records = [r for r in (normalize(x) for x in rem_json("show-all")) if allowed(cfg, r["list"])]
+    counts: Dict[str, int] = {}
+    for r in records:
+        counts[r["list"]] = counts.get(r["list"], 0) + 1
+    try:
+        meta = store_meta()
+    except Exception:
+        meta = {"lists": {}, "groups": []}
+    lists = []
+    for n in names:
+        m = meta["lists"].get(n, {})
+        lists.append({"name": n, "open": counts.get(n, 0), "group": m.get("group"), "color": m.get("color"),
+                      "emblem": m.get("emblem"), "shared": m.get("shared", False), "order": m.get("order", 0)})
+    groups = [{"name": g["name"], "lists": [l["name"] for l in lists if l["group"] == g["name"]]} for g in meta["groups"]]
+    groups = [g for g in groups if g["lists"]]
+    snap = {"lists": lists, "groups": groups, "reminders": records}
+    return snap, "\n".join("%-30s %d" % (l["name"], l["open"]) for l in lists)
+
+
+def verb_check(a, cfg) -> Tuple[Any, str]:
+    t0 = time.time()
+    n = len([x for x in list_names() if allowed(cfg, x)])
+    ms = int((time.time() - t0) * 1000)
+    info = {"ok": True, "version": VERSION, "lists": n, "ms": ms, "backend": "eventkit", "tool": find_tool(),
+            "store_meta": bool(store_meta()["lists"]), "allow_lists": cfg["allow_lists"], "audit_log": cfg["audit_log"]}
+    text = "\n".join([
+        "ok: %d lists in %d ms via %s (tikk-reminders %s)" % (n, ms, info["tool"], VERSION),
+        "    groups/colours from the Reminders store: %s" % ("yes" if info["store_meta"] else "no (needs Full Disk Access)"),
+        "    allow_lists: %s" % (", ".join(cfg["allow_lists"]) if cfg["allow_lists"] else "all lists"),
+        "    audit log: %s" % (cfg["audit_log"] or "off"),
+    ])
+    return info, text
+
+
+def verb_show(a, cfg) -> Tuple[Any, str]:
+    records = fetch(a.list, "done" if a.done else ("all" if a.all else "open"))
+    return records, format_reminders(records)
+
+
+def verb_add(a, cfg) -> Tuple[Any, str]:
+    options = ["--priority=" + PRIORITY_NAMES[a.priority]]
+    if a.body:
+        options.append("--notes=" + a.body)
+    if a.due:
+        options.append("--due-date=" + parse_due(a.due))
+    r = normalize(rem_json("add", options, [a.list, a.name]))
+    audit(cfg, "add", list=a.list, id=r["id"], name=r["name"], due=r["due"], priority=r["priority"])
+    return r, r["id"]
+
+
+def verb_mutate(a, cfg) -> Tuple[Any, str]:
+    """complete / uncomplete / delete by id or exact name."""
+    r = resolve(a.list, a.key, a.mode)
+    if a.verb == "delete" and r["completed"]:
+        # reminders-cli's delete only sees open reminders: uncomplete first, and
+        # put it back if the delete then fails, so an error leaves no side effect.
+        rem("uncomplete", (), [a.list, r["id"]])
+        try:
+            rem("delete", (), [a.list, r["id"]])
+        except ToolError:
+            rem("complete", (), [a.list, r["id"]])
+            raise
+    else:
+        rem(a.verb, (), [a.list, r["id"]])
+    audit(cfg, a.verb, list=a.list, id=r["id"], name=r["name"])
+    return {"id": r["id"], a.verb + "d": True}, r["id"]
+
+
+VERBS = {
+    "lists": verb_lists, "snapshot": verb_snapshot, "check": verb_check, "show": verb_show,
+    "add": verb_add, "complete": verb_mutate, "uncomplete": verb_mutate, "delete": verb_mutate,
+}
+
+
+# --------------------------------------------------------- 6. CLI and main
 class Parser(argparse.ArgumentParser):
     """argparse exits 2 on bad usage; the gateway speaks sysexits (64)."""
+
     def error(self, message):
         sys.stderr.write("tikk: %s\n" % message)
         sys.exit(EX_USAGE)
 
 
-def main(argv):
-    want_json = "--json" in argv  # accepted anywhere: "--json show L" and "show L --json"
-    argv = [x for x in argv if x != "--json"]
-
+def build_parser() -> argparse.ArgumentParser:
     ap = Parser(prog="tikk-reminders", description=__doc__.splitlines()[0],
                 epilog="Names that start with '-' go after a literal '--', e.g.: add Groceries -- '-dash first'")
     ap.add_argument("--json", action="store_true", help="machine-readable output")
+    ap.add_argument("--version", action="version", version="tikk-reminders " + VERSION)
     sub = ap.add_subparsers(dest="verb", required=True)
     sub.add_parser("lists", help="names of all reminder lists")
     sub.add_parser("snapshot", help="every list with its open count, plus every open reminder, in one call")
@@ -334,109 +464,32 @@ def main(argv):
     p.add_argument("name")
     p.add_argument("--body", default="")
     p.add_argument("--due", help="YYYY-MM-DD (all-day) or 'YYYY-MM-DD HH:MM'")
-    p.add_argument("--priority", type=int, default=0, choices=[0, 1, 5, 9],
+    p.add_argument("--priority", type=int, default=0, choices=sorted(PRIORITY_NAMES),
                    help="0 none, 1 high, 5 medium, 9 low (Reminders' own scale)")
     for verb, mode in (("complete", "open"), ("uncomplete", "done"), ("delete", "all")):
         p = sub.add_parser(verb, help="%s a reminder by id or exact name" % verb)
         p.add_argument("list")
         p.add_argument("key")
         p.set_defaults(mode=mode)
-    a = ap.parse_args(argv)
-    a.json = want_json
+    return ap
+
+
+def main(argv: List[str]) -> int:
+    want_json = "--json" in argv            # accepted anywhere: "--json show L" and "show L --json"
+    a = build_parser().parse_args([x for x in argv if x != "--json"])
     cfg = read_config()
-
-    log = lambda m: sys.stderr.write("tikk: %s\n" % m)
-    emit = lambda obj: print(json.dumps(obj, ensure_ascii=False))
-    WRITE_VERBS = ("add", "complete", "uncomplete", "delete")
-
     try:
-        if a.verb in WRITE_VERBS or a.verb == "show":
+        if hasattr(a, "list"):
             require_allowed(cfg, a.list)
-
-        if a.verb == "lists":
-            names = [n for n in rem("show-lists").splitlines() if n and allowed(cfg, n)]
-            emit(names) if a.json else print("\n".join(names))
-
-        elif a.verb == "snapshot":
-            names = [n for n in rem("show-lists").splitlines() if n and allowed(cfg, n)]
-            rs = [r for r in (normalize(x) for x in rem_json("show-all")) if allowed(cfg, r["list"])]
-            counts = {}
-            for r in rs:
-                counts[r["list"]] = counts.get(r["list"], 0) + 1
-            try:
-                meta = store_meta()
-            except Exception:
-                meta = {"lists": {}, "groups": []}
-            lists = []
-            for n in names:
-                m = meta["lists"].get(n, {})
-                lists.append({"name": n, "open": counts.get(n, 0), "group": m.get("group"), "color": m.get("color"),
-                              "emblem": m.get("emblem"), "shared": m.get("shared", False), "order": m.get("order", 0)})
-            groups = [{"name": g["name"], "lists": [l["name"] for l in lists if l["group"] == g["name"]]} for g in meta["groups"]]
-            groups = [g for g in groups if g["lists"]]
-            snap = {"lists": lists, "groups": groups, "reminders": rs}
-            if a.json:
-                emit(snap)
-            else:
-                for l in snap["lists"]:
-                    print("%-30s %d" % (l["name"], l["open"]))
-
-        elif a.verb == "check":
-            t0 = time.time()
-            n = len([n for n in rem("show-lists").splitlines() if n and allowed(cfg, n)])
-            ms = int((time.time() - t0) * 1000)
-            info = {"ok": True, "lists": n, "ms": ms, "backend": "eventkit", "tool": find_tool(),
-                    "store_meta": bool(store_meta()["lists"]), "allow_lists": cfg["allow_lists"],
-                    "audit_log": cfg["audit_log"]}
-            if a.json:
-                emit(info)
-            else:
-                print("ok: %d lists in %d ms via %s" % (n, ms, info["tool"]))
-                print("    groups/colours from the Reminders store: %s" % ("yes" if info["store_meta"] else "no (needs Full Disk Access)"))
-                print("    allow_lists: %s" % (", ".join(cfg["allow_lists"]) if cfg["allow_lists"] else "all lists"))
-                print("    audit log: %s" % (cfg["audit_log"] or "off"))
-
-        elif a.verb == "show":
-            rs = fetch(a.list, "done" if a.done else ("all" if a.all else "open"))
-            emit(rs) if a.json else print_reminders(rs)
-
-        elif a.verb == "add":
-            opts = ["--priority=" + PRIORITY_NAMES[a.priority]]
-            if a.body:
-                opts.append("--notes=" + a.body)
-            if a.due:
-                opts.append("--due-date=" + parse_due(a.due))
-            r = normalize(rem_json("add", opts, [a.list, a.name]))
-            audit(cfg, "add", list=a.list, id=r["id"], name=r["name"], due=r["due"], priority=r["priority"])
-            emit(r) if a.json else print(r["id"])
-
-        else:  # complete / uncomplete / delete
-            r = resolve(a.list, a.key, a.mode)
-            if a.verb == "delete" and r["completed"]:
-                # reminders-cli's delete only sees open reminders: uncomplete first,
-                # and put it back if the delete then fails, so we never leave a
-                # side effect behind on error.
-                rem("uncomplete", (), [a.list, r["id"]])
-                try:
-                    rem("delete", (), [a.list, r["id"]])
-                except ToolError:
-                    rem("complete", (), [a.list, r["id"]])
-                    raise
-            else:
-                rem(a.verb, (), [a.list, r["id"]])
-            audit(cfg, a.verb, list=a.list, id=r["id"], name=r["name"])
-            emit({"id": r["id"], a.verb + "d": True}) if a.json else print(r["id"])
-
-    except ValueError as e:
-        log(str(e))
-        return EX_USAGE
+        obj, text = VERBS[a.verb](a, cfg)
+        print(json.dumps(obj, ensure_ascii=False) if want_json else text)
+        return 0
     except ToolError as e:
         if a.verb in WRITE_VERBS:
-            audit(cfg, a.verb + "-failed", list=getattr(a, "list", None), key=getattr(a, "key", None) or getattr(a, "name", None),
-                  code=e.code, error=str(e)[:200])
-        log(str(e))
+            audit(cfg, a.verb + "-failed", list=getattr(a, "list", None),
+                  key=getattr(a, "key", None) or getattr(a, "name", None), code=e.code, error=str(e)[:200])
+        sys.stderr.write("tikk: %s\n" % e)
         return e.code
-    return 0
 
 
 if __name__ == "__main__":
