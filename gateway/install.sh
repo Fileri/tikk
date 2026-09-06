@@ -22,6 +22,10 @@ for f in tikk-dispatch tikk-reminders; do
   cp "$here/$f" "$dest/$f.tmp" && chmod 755 "$dest/$f.tmp" && mv "$dest/$f.tmp" "$dest/$f"
 done
 echo "installed: $dest/tikk-dispatch, $dest/tikk-reminders ($("$dest/tikk-reminders" --version))"
+if [ ! -e "$HOME/.tikk/config" ] && [ -r "$here/config.example" ]; then
+  cp "$here/config.example" "$HOME/.tikk/config" && chmod 600 "$HOME/.tikk/config"
+  echo "wrote $HOME/.tikk/config (everything commented out = defaults); edit it to scope the key"
+fi
 
 if ! command -v reminders >/dev/null 2>&1 && [ ! -x /opt/homebrew/bin/reminders ] && [ ! -x /usr/local/bin/reminders ]; then
   echo "missing: reminders-cli — brew install keith/formulae/reminders-cli" >&2

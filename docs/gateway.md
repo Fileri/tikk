@@ -93,6 +93,8 @@ generate a new key, add its line, test with `check`, then delete the old line.
 ## Configuration: `~/.tikk/config`
 
 Optional. `key = value`, one per line, `#` comments. Parsed, never sourced.
+`gateway/config.example` documents every key; `install.sh` copies it into
+place, fully commented out, if no config exists yet.
 
 ```
 allow_lists = Groceries, Household                                # the key may only see and touch these

@@ -1,0 +1,18 @@
+# tikk gateway configuration — copy to ~/.tikk/config on the Mac (chmod 600).
+# key = value, one per line. Parsed, never sourced. Unknown keys are ignored.
+# Every line is optional; without this file the key may use every verb on
+# every list, and the audit log is on.
+
+# Which lists the key may see and touch. Everything else is invisible to
+# `lists` and `snapshot` and refused (exit 77) by every other verb.
+#allow_lists = Groceries, Household
+
+# Which verbs the key may run. `check` is always allowed so you can diagnose
+# from the Linux side. The line below makes the key non-destructive: it can
+# add and tick, it cannot delete. Add `delete` to the list to allow it again.
+#allow_verbs = lists, show, snapshot, add, complete, uncomplete
+#allow_verbs = lists, show, snapshot, add, complete, uncomplete, delete
+
+# Where writes, failed writes and refused commands are logged (0600).
+# Default is ~/.tikk/audit.log; "off" disables logging.
+#audit_log = ~/.tikk/audit.log
