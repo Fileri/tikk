@@ -68,7 +68,11 @@ ssh -i ~/.ssh/tikk_ed25519 user@mac delete Groceries 6F1D…-UUID
 ```
 
 `snapshot` returns every list with its open count plus every open reminder
-in one round trip; the plugin polls that. Every verb takes `--json`. `add` accepts `--body`, `--due YYYY-MM-DD`
+in one round trip; the plugin polls that. It also reads what EventKit does
+not expose — Reminders.app's list **groups**, each list's **colour**, emblem
+and shared flag — straight from Reminders' own store on the Mac, read-only
+on a copy. That part needs the ssh session to have Full Disk Access; without
+it you just get a flat list of lists. Every verb takes `--json`. `add` accepts `--body`, `--due YYYY-MM-DD`
 (all-day) or `--due "YYYY-MM-DD HH:MM"`, and `--priority 0|1|5|9`
 (Reminders' own scale: none, high, medium, low). `complete`, `uncomplete`
 and `delete` take an id or an exact name; an ambiguous name is refused.
@@ -124,8 +128,18 @@ new ones. It talks to the Mac through `bridge/linux/tikk-shim`.
 Panel keys: Up/Down or j/k move, Enter or click ticks off, Delete deletes,
 `a` or `/` jumps to the add field, Tab cycles lists, Esc closes.
 Double-click the pill (or `ipc call fileri.tikk app`) for the window: sidebar
-with Today / Scheduled / All and your lists, main pane with tick circles,
+with Today / Scheduled / All, then your lists in their groups with their own
+colours and emblems (click a group to fold it), main pane with tick circles,
 notes and due dates, `h` shows completed, `n` starts a new reminder.
+
+Suggested Hyprland config so the window floats centred and stays on top, with
+keybinds for the window and the panel:
+
+```lua
+o.window({ class = "^org.quickshell$", title = "^tikk$" }, { float = true, center = true, pin = true, size = { 960, 640 } })
+o.bind("SUPER + R", "tikk reminders", "qs -p /usr/share/omarchy/shell ipc call fileri.tikk app")
+o.bind("SUPER + CTRL + R", "tikk panel", "omarchy-shell shell toggle fileri.tikk")
+```
 The pill dims when the Mac is unreachable. Polling is every 30 s; every
 action re-polls immediately. Writes only ever happen on your keypress.
 

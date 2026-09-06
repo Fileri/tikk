@@ -52,7 +52,14 @@ FloatingWindow {
   // theme: the accent's hue rotated by the golden angle per list, so every
   // theme switch recolours the lists with it. A grey accent gets a modest
   // saturation floor so lists stay distinguishable.
+  function listMeta(name) {
+    if (!host) return null
+    for (var i = 0; i < host.lists.length; i++) if (host.lists[i].name === name) return host.lists[i]
+    return null
+  }
   function listColor(name) {
+    var m = listMeta(name)
+    if (m && m.color) return m.color   // the list's own colour, as set on the Mac/iPhone (user data, not theme)
     var names = host ? host.listNames() : []
     var i = Math.max(0, names.indexOf(name))
     var a = Color.accent
@@ -99,6 +106,34 @@ FloatingWindow {
   readonly property int scheduledCount: host ? host.all.filter(function(r) { return !!r.due }).length : 0
   readonly property int allCount: host ? host.all.length : 0
   readonly property string targetList: kind === "list" ? listName : (host ? host.list : "")
+
+  // ---- sidebar rows: [{type:"list", list}, {type:"group", name, open, collapsed}, {type:"list", list, indent:true}]
+  property var collapsed: ({})
+  readonly property var sidebarRows: {
+    if (!host) return []
+    var rows = [], grouped = {}
+    var groups = host.groups || []
+    for (var g = 0; g < groups.length; g++) for (var j = 0; j < groups[g].lists.length; j++) grouped[groups[g].lists[j]] = true
+    for (var i = 0; i < host.lists.length; i++) if (!grouped[host.lists[i].name]) rows.push({ type: "list", list: host.lists[i], indent: false })
+    for (g = 0; g < groups.length; g++) {
+      var open = 0, members = []
+      for (j = 0; j < groups[g].lists.length; j++) { var m = listMeta(groups[g].lists[j]); if (m) { members.push(m); open += m.open } }
+      var isCollapsed = collapsed[groups[g].name] === true
+      rows.push({ type: "group", name: groups[g].name, open: open, collapsed: isCollapsed })
+      if (!isCollapsed) for (j = 0; j < members.length; j++) rows.push({ type: "list", list: members[j], indent: true })
+    }
+    return rows
+  }
+  function toggleGroup(name) { var c = JSON.parse(JSON.stringify(collapsed)); c[name] = !(c[name] === true); collapsed = c }
+  function emblemGlyph(m) {
+    var e = m && m.emblem ? String(m.emblem) : ""
+    if (e === "" || e === "default") return "󰉹"
+    if (e.length <= 2 || /[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}]/u.test(e)) return e   // an emoji emblem
+    if (e.indexOf("shopping") === 0) return "󰄐"
+    if (e.indexOf("nature") === 0) return "󰌪"
+    if (e.indexOf("weather") === 0) return "󰖐"
+    return "󰉹"
+  }
 
   function select(k, name) {
     kind = k; if (name !== undefined) listName = name
@@ -217,37 +252,62 @@ FloatingWindow {
             Layout.fillHeight: true
             clip: true
             spacing: Style.spacing.xxs
-            model: win.host ? win.host.lists : []
+            model: win.sidebarRows
             delegate: Rectangle {
               required property var modelData
-              readonly property bool active: win.kind === "list" && win.listName === modelData.name
+              readonly property bool isGroup: modelData.type === "group"
+              readonly property var lst: isGroup ? null : modelData.list
+              readonly property bool active: !isGroup && win.kind === "list" && win.listName === lst.name
               width: listList.width
               height: Style.spacing.popupRowHeight
               radius: Style.cornerRadius
               color: active ? win.rowSelected : (rowMouse.containsMouse ? win.rowHover : "transparent")
               RowLayout {
                 anchors.fill: parent
-                anchors.leftMargin: Style.spacing.controlPaddingX; anchors.rightMargin: Style.spacing.controlPaddingX
+                anchors.leftMargin: Style.spacing.controlPaddingX + (modelData.indent ? Style.space(14) : 0)
+                anchors.rightMargin: Style.spacing.controlPaddingX
                 spacing: Style.spacing.controlGap
+                // group: chevron · list: coloured emblem circle
+                Text {
+                  visible: isGroup
+                  text: isGroup && modelData.collapsed ? "󰅂" : "󰅀"
+                  color: win.muted
+                  font.pixelSize: Style.font.body
+                  Layout.preferredWidth: Style.space(20)
+                  horizontalAlignment: Text.AlignHCenter
+                }
                 Rectangle {
+                  visible: !isGroup
                   width: Style.space(20); height: width; radius: width / 2
-                  color: win.listColor(modelData.name)
-                  Text { anchors.centerIn: parent; text: "󰉹"; color: win.onTint; font.pixelSize: Style.font.caption }
+                  color: isGroup ? "transparent" : win.listColor(lst.name)
+                  Text { anchors.centerIn: parent; text: isGroup ? "" : win.emblemGlyph(lst); color: win.onTint; font.pixelSize: Style.font.caption }
                 }
                 Text {
                   Layout.fillWidth: true
-                  text: modelData.name
+                  text: isGroup ? modelData.name : lst.name
                   color: win.fg
                   font.family: win.fontFamily; font.pixelSize: Style.font.body
+                  font.bold: isGroup
                   elide: Text.ElideRight
                 }
                 Text {
-                  text: modelData.open > 0 ? modelData.open : ""
+                  visible: !isGroup && lst.shared === true
+                  text: "󰀎"
+                  color: win.muted
+                  font.pixelSize: Style.font.caption
+                }
+                Text {
+                  text: isGroup ? (modelData.collapsed && modelData.open > 0 ? modelData.open : "") : (lst.open > 0 ? lst.open : "")
                   color: win.muted
                   font.family: win.fontFamily; font.pixelSize: Style.font.body
                 }
               }
-              MouseArea { id: rowMouse; anchors.fill: parent; hoverEnabled: true; onClicked: win.select("list", modelData.name) }
+              MouseArea {
+                id: rowMouse
+                anchors.fill: parent
+                hoverEnabled: true
+                onClicked: isGroup ? win.toggleGroup(modelData.name) : win.select("list", lst.name)
+              }
             }
           }
           Text {

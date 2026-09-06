@@ -19,7 +19,8 @@ BarWidget {
 
   // ---- state
   property string list: ""            // the pill's list (setting, else first reported)
-  property var lists: []              // [{name, open}] every list on the Mac
+  property var lists: []              // [{name, open, group, color, emblem, shared}] every list on the Mac
+  property var groups: []             // [{name, lists:[names]}] Reminders.app groups, in display order
   property var all: []                // every open reminder across lists [{id,name,body,due,allday,priority,list}]
   property var items: []              // `all` filtered to `list` (what the panel shows)
   property bool online: false
@@ -82,6 +83,7 @@ BarWidget {
           if (text !== root.snapshotJson) {
             root.snapshotJson = text
             root.lists = snap.lists
+            root.groups = snap.groups || []
             root.all = snap.reminders
             if (root.list === "" && snap.lists.length > 0)
               root.list = root.configuredList !== "" ? root.configuredList : snap.lists[0].name

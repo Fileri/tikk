@@ -19,10 +19,15 @@ Python 3.9 compatible (that is what ships with Xcode CLT).
 """
 import argparse
 import datetime as dt
+import glob
 import json
 import os
+import plistlib
+import shutil
+import sqlite3
 import subprocess
 import sys
+import tempfile
 import time
 
 # Looked up in this order; nothing user-writable earlier than the tool itself.
@@ -43,6 +48,76 @@ class ToolError(Exception):
     def __init__(self, code, message):
         Exception.__init__(self, message)
         self.code = code
+
+
+# ---- list metadata EventKit does not expose: groups, colours, emblems, sharing.
+# Read straight from Reminders' Core Data store (read-only, on a copy so the
+# WAL is never touched). Needs Full Disk Access for the ssh session; without
+# it, or if Apple changes the schema, we simply return {} and the client shows
+# a flat list. Nothing here is written, ever.
+STORE_GLOB = os.path.expanduser("~/Library/Group Containers/group.com.apple.reminders/Container_v1/Stores/Data-*.sqlite")
+
+
+def plist_color(blob):
+    """ZCOLOR is an NSKeyedArchiver plist holding red/green/blue floats; → '#rrggbb' or None."""
+    try:
+        for o in plistlib.loads(blob).get("$objects", []):
+            if isinstance(o, dict) and all(k in o for k in ("red", "green", "blue")):
+                return "#%02x%02x%02x" % tuple(int(round(max(0.0, min(1.0, float(o[k]))) * 255)) for k in ("red", "green", "blue"))
+    except Exception:
+        pass
+    return None
+
+
+def emblem_of(raw):
+    """ZBADGEEMBLEM is either a symbolic name ('shopping1', 'default') or JSON {"Emoji": "💪"}."""
+    if not raw:
+        return None
+    try:
+        j = json.loads(raw)
+        if isinstance(j, dict) and j.get("Emoji"):
+            return j["Emoji"]
+    except ValueError:
+        pass
+    return str(raw)
+
+
+def store_meta():
+    """→ {"lists": {name: {group, color, emblem, shared, order}}, "groups": [{name, order}]}"""
+    meta = {"lists": {}, "groups": []}
+    tmp = tempfile.mkdtemp(prefix="tikk-")
+    try:
+        for store in sorted(glob.glob(STORE_GLOB)):
+            base = os.path.join(tmp, "db.sqlite")
+            for ext in ("", "-wal", "-shm"):
+                if os.path.exists(store + ext):
+                    shutil.copy(store + ext, base + ext)
+                elif os.path.exists(base + ext):
+                    os.remove(base + ext)
+            try:
+                con = sqlite3.connect("file:%s?mode=ro" % base, uri=True)
+                rows = con.execute(
+                    "select Z_PK, ZISGROUP, ZNAME, ZPARENTLIST, ZDADISPLAYORDER, ZBADGEEMBLEM, ZSHARINGSTATUS, ZCOLOR "
+                    "from ZREMCDBASELIST where ZMARKEDFORDELETION=0 and ZNAME is not null and ZISGROUP is not null").fetchall()
+                con.close()
+            except Exception:
+                continue
+            by_pk = {r[0]: r for r in rows}
+            for pk, isgroup, name, parent, order, emblem, shared, color in rows:
+                if isgroup:
+                    meta["groups"].append({"name": name, "order": order or 0})
+                else:
+                    meta["lists"][name] = {
+                        "group": by_pk[parent][2] if parent in by_pk else None,
+                        "color": plist_color(color) if color else None,
+                        "emblem": emblem_of(emblem),
+                        "shared": bool(shared),
+                        "order": order or 0,
+                    }
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    meta["groups"].sort(key=lambda g: g["order"])
+    return meta
 
 
 def find_tool():
@@ -200,7 +275,17 @@ def main(argv):
             counts = {}
             for r in rs:
                 counts[r["list"]] = counts.get(r["list"], 0) + 1
-            snap = {"lists": [{"name": n, "open": counts.get(n, 0)} for n in names], "reminders": rs}
+            try:
+                meta = store_meta()
+            except Exception:
+                meta = {"lists": {}, "groups": []}
+            lists = []
+            for n in names:
+                m = meta["lists"].get(n, {})
+                lists.append({"name": n, "open": counts.get(n, 0), "group": m.get("group"), "color": m.get("color"),
+                              "emblem": m.get("emblem"), "shared": m.get("shared", False), "order": m.get("order", 0)})
+            groups = [{"name": g["name"], "lists": [l["name"] for l in lists if l["group"] == g["name"]]} for g in meta["groups"]]
+            snap = {"lists": lists, "groups": groups, "reminders": rs}
             if a.json:
                 emit(snap)
             else:
