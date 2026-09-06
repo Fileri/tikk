@@ -181,6 +181,9 @@ FloatingWindow {
     if (r === "new") newField.forceActiveFocus()
     else { newField.focus = false; keyScope.forceActiveFocus() }
   }
+  // Entering an empty list has nothing to land on; the only thing to do there
+  // is add, so go straight to the new-reminder field (Tab still stops on the list).
+  function enterList() { focusRegion(rows.length === 0 ? "new" : "list") }
   function cycleRegion(dir) {
     var order = ["sidebar", "list", "new"]
     focusRegion(order[(order.indexOf(region) + dir + 3) % 3])
@@ -210,8 +213,8 @@ FloatingWindow {
   function goRight() {
     if (region === "sidebar") {
       var it = sideItems[sideCursor]
-      if (it && it.type === "group") { if (it.collapsed) setGroup(it.name, false); else focusRegion("list") }
-      else focusRegion("list")
+      if (it && it.type === "group") { if (it.collapsed) setGroup(it.name, false); else enterList() }
+      else enterList()
     }
   }
   function syncSideCursorToGroup(name) { for (var i = 0; i < sideItems.length; i++) if (sideItems[i].type === "group" && sideItems[i].name === name) { sideCursor = i; return } }
@@ -219,8 +222,9 @@ FloatingWindow {
     if (region === "sidebar") {
       var it = sideItems[sideCursor]
       if (it && it.type === "group") toggleGroup(it.name)
-      else { selectSideItem(sideCursor); focusRegion("list") }
-    } else tickCursor()
+      else { selectSideItem(sideCursor); enterList() }
+    } else if (rows.length === 0 && kind === "list") focusRegion("new")
+    else tickCursor()
   }
   function tick(r) { if (!host || String(r.id).indexOf("pending-") === 0) return; if (r.completed) host.uncomplete(r); else host.complete(r) }
   function tickCursor() { if (rows.length > 0) { tick(rows[cursor]); cursor = Math.max(0, Math.min(cursor, rows.length - 2)) } }
@@ -556,12 +560,33 @@ FloatingWindow {
                 onClicked: { win.cursor = index; win.focusRegion("list") }
               }
             }
-            Text {
+            Rectangle {   // empty state: carries the focus ring so Tab into an empty list is visible
               anchors.centerIn: parent
+              width: Math.min(parent.width, emptyCol.implicitWidth + Style.spacing.panelPadding * 2)
+              height: emptyCol.implicitHeight + Style.spacing.panelPadding * 2
+              radius: Style.cornerRadius
+              color: win.region === "list" ? win.rowSelected : "transparent"
+              border.width: win.region === "list" ? win.focusWidth : 0
+              border.color: win.region === "list" ? win.focusBorder : "transparent"
               visible: win.rows.length === 0 && win.host && win.host.online && !win.host.loading
-              text: "No Reminders"
-              color: win.muted
-              font.family: win.fontFamily; font.pixelSize: Style.font.heading
+              Column {
+                id: emptyCol
+                anchors.centerIn: parent
+                spacing: Style.spacing.labelGap
+                Text {
+                  anchors.horizontalCenter: parent.horizontalCenter
+                  text: "No Reminders"
+                  color: win.muted
+                  font.family: win.fontFamily; font.pixelSize: Style.font.heading
+                }
+                Text {
+                  anchors.horizontalCenter: parent.horizontalCenter
+                  text: win.kind === "list" ? "n or Enter: add one" : "nothing due"
+                  color: win.muted
+                  font.family: win.fontFamily; font.pixelSize: Style.font.bodySmall
+                }
+              }
+              MouseArea { anchors.fill: parent; onClicked: win.kind === "list" ? win.focusRegion("new") : win.focusRegion("list") }
             }
           }
 
