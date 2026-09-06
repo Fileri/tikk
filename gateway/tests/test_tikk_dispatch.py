@@ -55,6 +55,18 @@ class Dispatch(unittest.TestCase):
         self.assertIn("client=203.0.113.5", log)
         self.assertEqual(oct(os.stat(os.path.join(self.tmp.name, ".tikk", "audit.log")).st_mode & 0o777), "0o600")
 
+    def test_allow_verbs_from_config(self):
+        os.makedirs(os.path.join(self.tmp.name, ".tikk"), exist_ok=True)
+        with open(os.path.join(self.tmp.name, ".tikk", "config"), "w") as f:
+            f.write("allow_verbs = lists, show, snapshot, add, complete, uncomplete\n")
+        self.assertEqual(run("complete G x", self.tmp.name).returncode, 0)
+        p = run("delete G x", self.tmp.name)
+        self.assertEqual(p.returncode, 77, p.stderr)
+        self.assertIn("allow_verbs", p.stderr)
+        self.assertEqual(run("check", self.tmp.name).returncode, 0)   # diagnostics always reachable
+        with open(os.path.join(self.tmp.name, ".tikk", "audit.log"), encoding="utf-8") as f:
+            self.assertIn("event=refused why=\"'delete' is not in allow_verbs", f.read())
+
     def test_dash_names_reach_the_tool_intact(self):
         p = run("add Groceries -- '-dash first'", self.tmp.name)
         self.assertEqual(p.returncode, 0, p.stderr)

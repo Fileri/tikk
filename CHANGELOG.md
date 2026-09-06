@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.1 — 2026-09-06
+
+- `allow_verbs` in `~/.tikk/config`: the dispatcher refuses any verb outside
+  the set with exit 77 and an audit line, before the verb tool starts; the
+  verb tool checks again. `check` stays reachable. The plugin reads
+  `check --json` and hides delete when the gateway forbids it.
+
 ## 0.2.0 — 2026-09-06
 
 Gateway hardening after a review of the Mac side.

@@ -47,7 +47,8 @@ the config allows, with every write on record.
   before any argument parsing happens).
 - Pass flags to reminders-cli through data: list and reminder names are
   always placed after a literal `--`, option values use `--name=value`.
-- Reach lists outside `allow_lists`, if you set it.
+- Reach lists outside `allow_lists`, or run verbs outside `allow_verbs`, if
+  you set them. `allow_verbs` without `delete` makes the key non-destructive.
 - Connect from anywhere but the address in `from=`.
 - Read or write anything on the Mac except through reminders-cli and the
   read-only store query. The scripts never open a shell, never write outside
@@ -94,14 +95,22 @@ generate a new key, add its line, test with `check`, then delete the old line.
 Optional. `key = value`, one per line, `#` comments. Parsed, never sourced.
 
 ```
-allow_lists = Groceries, Household   # the key may only see and touch these
-audit_log   = ~/.tikk/audit.log      # default; "off" disables
+allow_lists = Groceries, Household                                # the key may only see and touch these
+allow_verbs = lists, show, snapshot, add, complete, uncomplete    # e.g. everything but delete
+audit_log   = ~/.tikk/audit.log                                   # default; "off" disables
 ```
 
 With `allow_lists` set, `lists` and `snapshot` return only those lists (and
 only groups that still have a visible member), and every other verb on a
-different list exits 77 before touching reminders-cli. `check` shows the
-effective values.
+different list exits 77 before touching reminders-cli.
+
+With `allow_verbs` set, the dispatcher refuses any other verb with exit 77
+and an audit line before the verb tool even starts; the verb tool checks
+again itself. `check` is always reachable so you can diagnose from the Linux
+side, and it reports the effective values. The plugin reads them and hides
+the delete affordances when `delete` is not allowed. A sensible default for a
+box you do not fully trust is the line above: it can add and tick, it cannot
+destroy.
 
 ## Audit log
 
@@ -169,7 +178,7 @@ refused (65); use the id. Names that start with `-` go after a literal `--`.
 | 65 | ambiguous name |
 | 66 | no such list or reminder |
 | 69 | reminders-cli failed, timed out, or returned something unexpected; also what the Linux shim returns when the Mac is unreachable |
-| 77 | no permission: the Reminders grant is missing, or the list is outside `allow_lists` |
+| 77 | no permission: the Reminders grant is missing, the list is outside `allow_lists`, or the verb is outside `allow_verbs` |
 | 78 | reminders-cli is not installed |
 
 ## Testing

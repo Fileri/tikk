@@ -161,8 +161,10 @@ list of lists and everything else still works.
   is always called with data after a literal `--`, so names can never become
   flags.
 - Optional `~/.tikk/config` on the Mac: `allow_lists = A, B` scopes the key
-  to named lists; `audit_log` (on by default) records every write, failed
-  write and refused command with the client's address.
+  to named lists, `allow_verbs = …` scopes it to verbs (leave out `delete`
+  and the key cannot destroy anything), and `audit_log` (on by default)
+  records every write, failed write and refused command with the client's
+  address.
 - Nothing about your reminders is stored on the Linux side.
 
 The full model, the audit format, the JSON contract and the exit codes are in

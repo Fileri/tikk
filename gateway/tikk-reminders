@@ -38,7 +38,7 @@ import sys
 import time
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
-VERSION = "0.2.0"
+VERSION = "0.2.1"
 
 # ----------------------------------------------------------------- 1. constants
 # Looked up in this order; nothing user-writable earlier than the tool itself.
@@ -76,9 +76,10 @@ def read_config(path: str = CONFIG_PATH) -> Dict[str, Any]:
     """~/.tikk/config, `key = value`, parsed not sourced. Unknown keys are ignored.
 
       allow_lists = Groceries, Household   # the key may only see/touch these (default: all)
+      allow_verbs = lists, show, snapshot, add, complete, uncomplete   # e.g. everything but delete (default: all)
       audit_log   = ~/.tikk/audit.log      # writes, failed writes, refusals (default); "off" disables
     """
-    cfg: Dict[str, Any] = {"allow_lists": None, "audit_log": DEFAULT_AUDIT}
+    cfg: Dict[str, Any] = {"allow_lists": None, "allow_verbs": None, "audit_log": DEFAULT_AUDIT}
     try:
         with open(path, encoding="utf-8") as f:
             lines = f.read().splitlines()
@@ -92,6 +93,9 @@ def read_config(path: str = CONFIG_PATH) -> Dict[str, Any]:
         if key == "allow_lists":
             names = [n.strip() for n in value.split(",") if n.strip()]
             cfg["allow_lists"] = names or None
+        elif key == "allow_verbs":
+            verbs = [v.strip() for v in value.split(",") if v.strip()]
+            cfg["allow_verbs"] = verbs or None
         elif key == "audit_log":
             cfg["audit_log"] = None if value.lower() in ("off", "no", "false", "") else os.path.expanduser(value)
     return cfg
@@ -119,12 +123,21 @@ def audit(cfg: Dict[str, Any], event: str, **fields: Any) -> None:
 
 
 def allowed(cfg: Dict[str, Any], list_name: str) -> bool:
-    return cfg["allow_lists"] is None or list_name in cfg["allow_lists"]
+    return cfg.get("allow_lists") is None or list_name in cfg["allow_lists"]
 
 
 def require_allowed(cfg: Dict[str, Any], list_name: str) -> None:
     if not allowed(cfg, list_name):
         raise ToolError(EX_NOPERM, "list %r is not in allow_lists on the gateway" % list_name)
+
+
+def verb_allowed(cfg: Dict[str, Any], verb: str) -> bool:
+    return verb == "check" or cfg.get("allow_verbs") is None or verb in cfg["allow_verbs"]
+
+
+def require_verb(cfg: Dict[str, Any], verb: str) -> None:
+    if not verb_allowed(cfg, verb):
+        raise ToolError(EX_NOPERM, "verb %r is not in allow_verbs on the gateway" % verb)
 
 
 # ------------------------------------------- 3. list metadata from the store
@@ -386,11 +399,13 @@ def verb_check(a, cfg) -> Tuple[Any, str]:
     n = len([x for x in list_names() if allowed(cfg, x)])
     ms = int((time.time() - t0) * 1000)
     info = {"ok": True, "version": VERSION, "lists": n, "ms": ms, "backend": "eventkit", "tool": find_tool(),
-            "store_meta": bool(store_meta()["lists"]), "allow_lists": cfg["allow_lists"], "audit_log": cfg["audit_log"]}
+            "store_meta": bool(store_meta()["lists"]), "allow_lists": cfg.get("allow_lists"),
+            "allow_verbs": cfg.get("allow_verbs"), "audit_log": cfg.get("audit_log")}
     text = "\n".join([
         "ok: %d lists in %d ms via %s (tikk-reminders %s)" % (n, ms, info["tool"], VERSION),
         "    groups/colours from the Reminders store: %s" % ("yes" if info["store_meta"] else "no (needs Full Disk Access)"),
         "    allow_lists: %s" % (", ".join(cfg["allow_lists"]) if cfg["allow_lists"] else "all lists"),
+        "    allow_verbs: %s" % (", ".join(cfg["allow_verbs"]) if cfg.get("allow_verbs") else "all verbs"),
         "    audit log: %s" % (cfg["audit_log"] or "off"),
     ])
     return info, text
@@ -479,6 +494,7 @@ def main(argv: List[str]) -> int:
     a = build_parser().parse_args([x for x in argv if x != "--json"])
     cfg = read_config()
     try:
+        require_verb(cfg, a.verb)
         if hasattr(a, "list"):
             require_allowed(cfg, a.list)
         obj, text = VERBS[a.verb](a, cfg)

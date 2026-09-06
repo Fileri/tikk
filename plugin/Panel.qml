@@ -40,7 +40,7 @@ Panel {
     cursor = Math.max(0, Math.min(cursor, count - 2))
   }
   function deleteCursor() {
-    if (addField.activeFocus || count === 0) return
+    if (addField.activeFocus || count === 0 || !(host && host.canDelete)) return
     host.remove(items[cursor])
     cursor = Math.max(0, Math.min(cursor, count - 2))
   }
@@ -201,7 +201,8 @@ Panel {
         }
 
         Text {
-          text: "enter tick · del delete · tab next list · a add · esc close"
+          text: (root.host && !root.host.canDelete) ? "enter tick · tab next list · a add · esc close"
+                                                    : "enter tick · del delete · tab next list · a add · esc close"
           color: Color.muted
           font.family: root.fontFamily
           font.pixelSize: Style.font.caption

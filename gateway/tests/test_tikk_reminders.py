@@ -180,7 +180,21 @@ class ConfigAndAudit(unittest.TestCase):
     def test_missing_config_means_open_and_audit_on(self):
         cfg = T.read_config("/nonexistent/config")
         self.assertIsNone(cfg["allow_lists"])
+        self.assertIsNone(cfg["allow_verbs"])
         self.assertEqual(cfg["audit_log"], T.DEFAULT_AUDIT)
+
+    def test_allow_verbs(self):
+        with tempfile.NamedTemporaryFile("w", suffix=".cfg", delete=False) as f:
+            f.write("allow_verbs = lists, show, snapshot, add, complete, uncomplete\n")
+        try:
+            cfg = T.read_config(f.name)
+        finally:
+            os.unlink(f.name)
+        self.assertTrue(T.verb_allowed(cfg, "complete"))
+        self.assertFalse(T.verb_allowed(cfg, "delete"))
+        self.assertTrue(T.verb_allowed(cfg, "check"))
+        with mock.patch.object(T, "read_config", return_value=cfg):
+            self.assertEqual(T.main(["delete", "G", "x"]), T.EX_NOPERM)
 
     def test_audit_line_and_mode(self):
         with tempfile.TemporaryDirectory() as d:

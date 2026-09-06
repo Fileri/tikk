@@ -150,7 +150,7 @@ FloatingWindow {
   }
   function tick(r) { if (!host || String(r.id).indexOf("pending-") === 0) return; if (r.completed) host.uncomplete(r); else host.complete(r) }
   function tickCursor() { if (rows.length > 0) { tick(rows[cursor]); cursor = Math.max(0, Math.min(cursor, rows.length - 2)) } }
-  function deleteCursor() { if (rows.length > 0 && host) { host.remove(rows[cursor]); cursor = Math.max(0, Math.min(cursor, rows.length - 2)) } }
+  function deleteCursor() { if (rows.length > 0 && host && host.canDelete) { host.remove(rows[cursor]); cursor = Math.max(0, Math.min(cursor, rows.length - 2)) } }
   function submitNew() {
     var t = newField.text; newField.text = ""
     if (t.trim() !== "" && host) host.add(t, targetList)
@@ -428,9 +428,9 @@ FloatingWindow {
                     elide: Text.ElideRight
                   }
                 }
-                Text {   // delete, revealed on hover like Reminders' ⓘ
+                Text {   // delete, revealed on hover like Reminders' ⓘ; hidden when the gateway forbids delete
                   text: "✕"
-                  visible: mm.containsMouse && !done
+                  visible: mm.containsMouse && !done && win.host && win.host.canDelete
                   color: win.muted
                   font.pixelSize: Style.font.body
                   Layout.alignment: Qt.AlignVCenter
@@ -478,7 +478,8 @@ FloatingWindow {
             }
           }
           Text {
-            text: "space tick · del delete · n new · tab next list · h completed · esc close"
+            text: (win.host && !win.host.canDelete) ? "space tick · n new · tab next list · h completed · esc close"
+                                                    : "space tick · del delete · n new · tab next list · h completed · esc close"
             color: win.muted
             font.family: win.fontFamily; font.pixelSize: Style.font.caption
           }

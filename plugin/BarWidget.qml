@@ -27,6 +27,24 @@ BarWidget {
   property bool loading: false
   property string lastError: ""
   property string snapshotJson: ""
+  // gateway capabilities from `check --json`: allow_verbs (null = all). Refreshed
+  // at start and whenever the gateway comes back online.
+  property var allowVerbs: null
+  readonly property bool canDelete: allowVerbs === null || allowVerbs.indexOf("delete") >= 0
+  readonly property bool canAdd: allowVerbs === null || allowVerbs.indexOf("add") >= 0
+  readonly property bool canComplete: allowVerbs === null || allowVerbs.indexOf("complete") >= 0
+  Process {
+    id: capsProc
+    command: [root.shim, "check", "--json"]
+    stdout: StdioCollector {
+      onStreamFinished: {
+        try { var c = JSON.parse(text); root.allowVerbs = c.allow_verbs === undefined ? null : c.allow_verbs } catch (e) {}
+      }
+    }
+  }
+  function loadCaps() { if (!demo && !capsProc.running) capsProc.running = true }
+  onOnlineChanged: if (online) loadCaps()
+  Component.onCompleted: loadCaps()
   // completed reminders for one list, loaded on demand by the window
   property string doneList: ""
   property var done: []
@@ -153,9 +171,9 @@ BarWidget {
     done = done.filter(function(r) { return r.id !== item.id })
     deriveItems()
   }
-  function complete(item) { dropLocal(item); act(["complete", item.list || list, item.id]) }
+  function complete(item) { if (!canComplete) return; dropLocal(item); act(["complete", item.list || list, item.id]) }
   function uncomplete(item) { dropLocal(item); act(["uncomplete", item.list || list, item.id]) }
-  function remove(item) { dropLocal(item); act(["delete", item.list || list, item.id]) }
+  function remove(item) { if (!canDelete) { lastError = "delete is not allowed by the gateway"; return } dropLocal(item); act(["delete", item.list || list, item.id]) }
   function add(name, listName) {
     var n = String(name).trim()
     var l = listName || list
@@ -193,7 +211,8 @@ BarWidget {
       root.complete(r); return r.id
     }
     function status(): string {
-      return JSON.stringify({ list: root.list, open: root.openCount, online: root.online, error: root.lastError })
+      return JSON.stringify({ list: root.list, open: root.openCount, online: root.online, error: root.lastError,
+                              allow_verbs: root.allowVerbs, can_delete: root.canDelete })
     }
   }
 

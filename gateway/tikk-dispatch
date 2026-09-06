@@ -20,20 +20,34 @@ import shlex
 import sys
 
 VERBS = {"lists", "show", "snapshot", "add", "complete", "uncomplete", "delete", "check"}
+ALWAYS = {"check"}                                 # diagnostics stay reachable whatever allow_verbs says
+CONFIG = os.path.expanduser("~/.tikk/config")
 AUDIT = os.path.expanduser("~/.tikk/audit.log")   # refusals land next to the verb tool's write log
+
+
+def read_config():
+    """Only the two keys the dispatcher needs: allow_verbs (set or None) and whether auditing is on."""
+    cfg = {"allow_verbs": None, "audit": True}
+    try:
+        with open(CONFIG, encoding="utf-8") as f:
+            lines = f.read().splitlines()
+    except OSError:
+        return cfg
+    for line in lines:
+        k, _, v = line.split("#", 1)[0].partition("=")
+        k, v = k.strip(), v.strip()
+        if k == "allow_verbs":
+            verbs = {x.strip() for x in v.split(",") if x.strip()}
+            cfg["allow_verbs"] = verbs or None
+        elif k == "audit_log" and v.lower() in ("off", "no", "false", ""):
+            cfg["audit"] = False
+    return cfg
 
 
 def audit_refusal(raw, why):
     """One line per refused command, 0600, never fatal. Same file and shape as tikk-reminders' log."""
-    if os.path.exists(os.path.expanduser("~/.tikk/config")):
-        try:
-            with open(os.path.expanduser("~/.tikk/config"), encoding="utf-8") as f:
-                for line in f:
-                    k, _, v = line.split("#", 1)[0].partition("=")
-                    if k.strip() == "audit_log" and v.strip().lower() in ("off", "no", "false", ""):
-                        return
-        except OSError:
-            pass
+    if not read_config()["audit"]:
+        return
     client = (os.environ.get("SSH_CLIENT") or "local").split()[0]
     line = "%s client=%s event=refused why=%s cmd=%s\n" % (
         datetime.datetime.now().astimezone().isoformat(timespec="seconds"), client,
@@ -47,10 +61,10 @@ def audit_refusal(raw, why):
         pass
 
 
-def refuse(msg, raw=""):
+def refuse(msg, raw="", code=64):
     audit_refusal(raw, msg)
     sys.stderr.write("tikk-dispatch: %s\n" % msg)
-    sys.exit(64)  # EX_USAGE
+    sys.exit(code)  # 64 EX_USAGE for unknown/unparseable, 77 EX_NOPERM for a verb the config forbids
 
 
 def main():
@@ -70,6 +84,9 @@ def main():
     verb = words[0] if words else ""
     if verb not in VERBS:
         refuse("'%s' is not a tikk verb" % verb, raw)
+    allow = read_config()["allow_verbs"]
+    if allow is not None and verb not in allow and verb not in ALWAYS:
+        refuse("'%s' is not in allow_verbs on this gateway" % verb, raw, code=77)
     bindir = os.path.dirname(os.path.realpath(__file__))
     # Fixed, system-only PATH: nothing user-writable can shadow osascript/pkill/open.
     os.environ["PATH"] = "/usr/bin:/bin:/usr/sbin:/sbin"
