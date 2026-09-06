@@ -39,14 +39,21 @@ deliberately out of scope. Writes only ever happen on your keypress.
 - **Pill** in the bar: `☑ 5`, the open reminders in the list you choose.
   Dims when the Mac is unreachable. Left-click panel, double-click window,
   middle-click refresh.
-- **Panel** under the bar: one list, keyboard first. Up/Down or `j`/`k`,
-  Enter or click ticks off, Delete deletes, `a` or `/` adds, Tab cycles
-  lists, Esc closes.
+- **Panel** under the bar: one list, keyboard first. Up/Down or `j`/`k`
+  move, Enter or click ticks off, Left/Right or `h`/`l` switch list, `a` or
+  `n` adds, Delete deletes (if allowed), Esc closes. Tab moves to the
+  neighbouring bar panel, as in every Omarchy panel.
 - **Window** laid out like Reminders.app: Today / Scheduled / All tiles,
   your lists in their groups with their own colours and emblems, the list
   title in its colour, tick circles, notes and due dates, a foldable
-  completed section, a New Reminder row. Space or Enter ticks, Delete
-  deletes, `n` new, Tab next list, `h` completed, Esc closes.
+  completed section, a New Reminder row. Keyboard follows the platform
+  convention: **Tab** moves between sidebar, list and the new-reminder
+  field, **arrows** (or `j`/`k`) move within the focused region, **Left/
+  Right** (or `h`/`l`) jump between sidebar and list and fold groups,
+  **Enter** opens a list or ticks a reminder, **Space** ticks, **1 2 3**
+  jump to Today / Scheduled / All and **4–9** to your lists in sidebar
+  order (also with Alt), `n` new, `c` completed, `g`/`G` top/bottom, Esc
+  unwinds then closes. The focused region carries the theme's focus ring.
 - **IPC** for keybinds and scripts: `toggle`, `app`, `add`, `complete`,
   `refresh`, `status`.
 

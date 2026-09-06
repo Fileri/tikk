@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "fileri.tikk",
   "name": "tikk",
-  "version": "0.1.0",
+  "version": "0.3.0",
   "author": "Erik Fillipsveen",
   "license": "MIT",
   "description": "Apple Reminders in the Omarchy bar, through a confined SSH key to a Mac you own. Pill with the open count of one list, a keyboard panel to tick and add, and a window laid out like Reminders.app.",

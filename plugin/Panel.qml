@@ -5,8 +5,9 @@ import qs.Commons
 import qs.Ui
 
 // tikk panel — one list, tick things off, add new ones.
-//   Up/Down move · Enter/click = complete · Delete = delete · a or / = add field
-//   Tab = next list · Esc = leave the add field, then close.
+//   Up/Down (j/k) move · Enter/click = complete · Delete = delete · a or / = add field
+//   Left/Right (h/l) = previous/next list · Tab = the neighbouring bar panel (Omarchy's
+//   convention, so it is not ours to take) · Esc = leave the add field, then close.
 // Reads state from the host widget (the single poller) and asks it to act.
 Panel {
   id: root
@@ -77,16 +78,18 @@ Panel {
       anchors.fill: parent
       blocked: addField.activeFocus
       onCloseRequested: root.close()
-      onMoveRequested: function(dx, dy) { root.moveCursor(dy) }
+      onMoveRequested: function(dx, dy) { if (dx !== 0) root.nextList(dx); else root.moveCursor(dy) }
       onActivateRequested: root.activateCursor()
       onReturnRequested: root.activateCursor()
       onDeleteRequested: root.deleteCursor()
-      onTabRequested: function(direction) { root.nextList(direction) }
+      onTabRequested: function(direction) { root.switchPanel(direction) }
       onTextKey: function(t) {
-        if (t === "a" || t === "/") addField.forceActiveFocus()
+        if (t === "a" || t === "/" || t === "n") addField.forceActiveFocus()
         else if (t === "r") root.host.refresh()
         else if (t === "j") root.moveCursor(1)
         else if (t === "k") root.moveCursor(-1)
+        else if (t === "h") root.nextList(-1)
+        else if (t === "l") root.nextList(1)
       }
 
       ColumnLayout {
@@ -201,8 +204,7 @@ Panel {
         }
 
         Text {
-          text: (root.host && !root.host.canDelete) ? "enter tick · tab next list · a add · esc close"
-                                                    : "enter tick · del delete · tab next list · a add · esc close"
+          text: "enter tick · ←→ list · a add · esc close" + (root.host && root.host.canDelete ? " · del delete" : "")
           color: Color.muted
           font.family: root.fontFamily
           font.pixelSize: Style.font.caption

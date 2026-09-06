@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.3.0 — 2026-09-06
+
+Keyboard navigation follows the platform convention. Window: Tab between
+sidebar, list and the new-reminder field; arrows (j/k) within a region;
+Left/Right (h/l) between sidebar and list and to fold groups; Enter opens a
+list or ticks; Space ticks; 1 2 3 jump to Today / Scheduled / All and 4–9 to
+lists in sidebar order (also Alt+digit); `c` toggles completed (was `h`);
+g/G top/bottom; a theme focus ring shows the active region; the window opens
+on Today. Panel: Tab now moves to the neighbouring bar panel as in every
+Omarchy panel; Left/Right (h/l) switch list; `n` also opens the add field.
+
 ## 0.2.1 — 2026-09-06
 
 - `allow_verbs` in `~/.tikk/config`: the dispatcher refuses any verb outside
