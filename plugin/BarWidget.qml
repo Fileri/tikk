@@ -18,12 +18,22 @@ BarWidget {
   readonly property string shim: home + "/.local/bin/tikk"
 
   // ---- state
-  property string list: ""            // active list name (setting, else first reported)
-  property var items: []              // [{id,name,body,due,allday,priority,completed}]
+  property string list: ""            // the pill's list (setting, else first reported)
+  property var lists: []              // [{name, open}] every list on the Mac
+  property var all: []                // every open reminder across lists [{id,name,body,due,allday,priority,list}]
+  property var items: []              // `all` filtered to `list` (what the panel shows)
   property bool online: false
   property bool loading: false
   property string lastError: ""
-  property var lists: []
+  property string snapshotJson: ""
+  // completed reminders for one list, loaded on demand by the window
+  property string doneList: ""
+  property var done: []
+  property bool doneLoading: false
+  function deriveItems() {
+    var l = list
+    items = all.filter(function(r) { return r.list === l })
+  }
 
   readonly property int openCount: items.length
   readonly property string configuredList: String(setting("list", ""))
@@ -56,39 +66,28 @@ BarWidget {
 
   // ---- poller
   function refresh() {
-    if (list === "") { listsProc.running = true; return }
     if (poll.running) return
     loading = true
-    poll.command = [shim, "show", list, "--json"]
     poll.running = true
   }
   Process {
-    id: listsProc
-    command: [root.shim, "lists", "--json"]
-    stdout: StdioCollector {
-      onStreamFinished: {
-        try {
-          var ls = JSON.parse(text)
-          root.lists = ls
-          if (root.list === "" && ls.length > 0) root.list = root.configuredList !== "" ? root.configuredList : ls[0]
-        } catch (e) {}
-      }
-    }
-    onExited: function(code) {
-      root.online = (code === 0)
-      if (code !== 0) root.lastError = code === 69 ? "gateway offline" : ("lists failed (exit " + code + ")")
-      else if (root.list !== "") Qt.callLater(root.refresh)
-    }
-  }
-  Process {
     id: poll
+    command: [root.shim, "snapshot", "--json"]
     property string err: ""
     stderr: StdioCollector { onStreamFinished: poll.err = text.trim().split("\n").pop() || "" }
     stdout: StdioCollector {
       onStreamFinished: {
         try {
-          var rs = JSON.parse(text)
-          if (JSON.stringify(rs) !== JSON.stringify(root.items)) root.items = rs
+          var snap = JSON.parse(text)
+          if (text !== root.snapshotJson) {
+            root.snapshotJson = text
+            root.lists = snap.lists
+            root.all = snap.reminders
+            if (root.list === "" && snap.lists.length > 0)
+              root.list = root.configuredList !== "" ? root.configuredList : snap.lists[0].name
+            root.deriveItems()
+            if (root.doneList !== "") root.loadDone(root.doneList)
+          }
           root.lastError = ""
         } catch (e) { /* non-zero exit handles it */ }
       }
@@ -96,8 +95,23 @@ BarWidget {
     onExited: function(code) {
       root.loading = false
       root.online = (code === 0)
-      if (code !== 0) root.lastError = code === 69 ? "gateway offline" : (poll.err || ("show failed (exit " + code + ")"))
+      if (code !== 0) root.lastError = code === 69 ? "gateway offline" : (poll.err || ("snapshot failed (exit " + code + ")"))
     }
+  }
+  function loadDone(listName) {
+    doneList = listName
+    if (listName === "") { done = []; return }
+    if (doneProc.running) return
+    doneLoading = true
+    doneProc.command = [shim, "show", listName, "--done", "--json"]
+    doneProc.running = true
+  }
+  Process {
+    id: doneProc
+    stdout: StdioCollector {
+      onStreamFinished: { try { root.done = JSON.parse(text) } catch (e) { root.done = [] } }
+    }
+    onExited: root.doneLoading = false
   }
   Timer {
     interval: root.online ? 30000 : 120000
@@ -124,21 +138,24 @@ BarWidget {
       else Qt.callLater(root.refresh)
     }
   }
-  function complete(item) {
-    items = items.filter(function(r) { return r.id !== item.id })   // optimistic
-    act(["complete", list, item.id])
+  function dropLocal(item) {   // optimistic removal from every derived view
+    all = all.filter(function(r) { return r.id !== item.id })
+    done = done.filter(function(r) { return r.id !== item.id })
+    deriveItems()
   }
-  function remove(item) {
-    items = items.filter(function(r) { return r.id !== item.id })
-    act(["delete", list, item.id])
-  }
-  function add(name) {
+  function complete(item) { dropLocal(item); act(["complete", item.list || list, item.id]) }
+  function uncomplete(item) { dropLocal(item); act(["uncomplete", item.list || list, item.id]) }
+  function remove(item) { dropLocal(item); act(["delete", item.list || list, item.id]) }
+  function add(name, listName) {
     var n = String(name).trim()
-    if (n === "") return
-    items = items.concat([{ id: "pending-" + Date.now(), name: n, body: null, due: null, allday: false, priority: 0, completed: false }])
-    act(["add", list, n])
+    var l = listName || list
+    if (n === "" || l === "") return
+    all = all.concat([{ id: "pending-" + Date.now(), name: n, body: null, due: null, allday: false, priority: 0, completed: false, list: l }])
+    deriveItems()
+    act(["add", l, n])
   }
-  function switchList(name) { list = name; items = []; refresh() }
+  function switchList(name) { list = name; deriveItems() }
+  function listNames() { return lists.map(function(l) { return l.name }) }
   function findByName(name) {
     var n = String(name).trim()
     for (var i = 0; i < items.length; i++) if (items[i].name === n) return items[i]
@@ -153,11 +170,12 @@ BarWidget {
     function show(): void { root.open() }
     function hide(): void { root.close() }
     function toggle(): void { root.toggle() }
+    function app(): void { root.app() }
     function refresh(): string { root.refresh(); return "ok" }
     function add(name: string): string {
       if (!root.online) return "offline"
       if (String(name).trim() === "") return "empty"
-      root.add(name); return "queued"
+      root.add(name, root.list); return "queued"
     }
     function complete(name: string): string {
       var r = root.findByName(name)
@@ -169,9 +187,23 @@ BarWidget {
     }
   }
 
-  // ---- pill
+  // ---- the app window: same data, Reminders.app layout. Loaded on first use.
+  Loader {
+    id: windowLoader
+    active: false
+    source: Qt.resolvedUrl("TikkWindow.qml")
+    onLoaded: { item.hostWidget = root; item.visible = true; root.refresh() }
+  }
+  function app() {
+    if (!windowLoader.active) { windowLoader.active = true; return }
+    windowLoader.item.visible = !windowLoader.item.visible
+    if (windowLoader.item.visible) refresh()
+  }
+
+  // ---- pill: click = panel, double-click = app window, middle = refresh
   implicitWidth: button.implicitWidth
   implicitHeight: button.implicitHeight
+  Timer { id: dblClick; interval: 320; onTriggered: root.toggle() }
   BarIconButton {
     id: button
     anchors.fill: parent
@@ -181,8 +213,10 @@ BarWidget {
     slotSize: Style.bar.statusSlot
     tooltipText: root.online ? (root.list + ": " + root.openCount + " open") : ("tikk: " + root.lastError)
     onPressed: function(b) {
-      if (b === Qt.MiddleButton) root.refresh()
-      else if (b === Qt.LeftButton) root.toggle()
+      if (b === Qt.MiddleButton) { root.refresh(); return }
+      if (b !== Qt.LeftButton) return
+      if (dblClick.running) { dblClick.stop(); root.close(); root.app() }
+      else dblClick.start()
     }
   }
 }

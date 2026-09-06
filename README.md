@@ -18,7 +18,7 @@ out of scope.
 
 ## Status
 
-Gateway done and measured. Omarchy plugin: first working version (pill + panel, one list); no separate app window yet.
+Gateway done and measured. Omarchy plugin: pill, keyboard panel, and an app window laid out like Reminders.app (smart lists, My Lists with counts, completed section, new-reminder row).
 
 | Verb | Latency (Mac mini M2, macOS 26.6) |
 |---|---|
@@ -67,7 +67,8 @@ ssh -i ~/.ssh/tikk_ed25519 user@mac complete Groceries "Oat milk"
 ssh -i ~/.ssh/tikk_ed25519 user@mac delete Groceries 6F1D…-UUID
 ```
 
-Every verb takes `--json`. `add` accepts `--body`, `--due YYYY-MM-DD`
+`snapshot` returns every list with its open count plus every open reminder
+in one round trip; the plugin polls that. Every verb takes `--json`. `add` accepts `--body`, `--due YYYY-MM-DD`
 (all-day) or `--due "YYYY-MM-DD HH:MM"`, and `--priority 0|1|5|9`
 (Reminders' own scale: none, high, medium, low). `complete`, `uncomplete`
 and `delete` take an id or an exact name; an ambiguous name is refused.
@@ -122,6 +123,9 @@ new ones. It talks to the Mac through `bridge/linux/tikk-shim`.
 
 Panel keys: Up/Down or j/k move, Enter or click ticks off, Delete deletes,
 `a` or `/` jumps to the add field, Tab cycles lists, Esc closes.
+Double-click the pill (or `ipc call fileri.tikk app`) for the window: sidebar
+with Today / Scheduled / All and your lists, main pane with tick circles,
+notes and due dates, `h` shows completed, `n` starts a new reminder.
 The pill dims when the Mac is unreachable. Polling is every 30 s; every
 action re-polls immediately. Writes only ever happen on your keypress.
 

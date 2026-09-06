@@ -17,7 +17,7 @@ import os
 import shlex
 import sys
 
-VERBS = {"lists", "show", "add", "complete", "uncomplete", "delete", "check"}
+VERBS = {"lists", "show", "snapshot", "add", "complete", "uncomplete", "delete", "check"}
 
 
 def refuse(msg):

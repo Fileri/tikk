@@ -46,10 +46,12 @@ Panel {
     if (host && t.trim() !== "") host.add(t)
   }
   function nextList(direction) {
-    if (!host || !host.lists || host.lists.length < 2) return
-    var i = host.lists.indexOf(host.list)
-    var n = (i + direction + host.lists.length) % host.lists.length
-    host.switchList(host.lists[n]); cursor = 0
+    if (!host) return
+    var names = host.listNames()
+    if (names.length < 2) return
+    var i = names.indexOf(host.list)
+    var n = (i + direction + names.length) % names.length
+    host.switchList(names[n]); cursor = 0
   }
   function fmtDue(r) {
     if (!r.due) return ""

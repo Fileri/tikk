@@ -164,6 +164,7 @@ def main(argv):
     ap.add_argument("--json", action="store_true", help="machine-readable output")
     sub = ap.add_subparsers(dest="verb", required=True)
     sub.add_parser("lists", help="names of all reminder lists")
+    sub.add_parser("snapshot", help="every list with its open count, plus every open reminder, in one call")
     sub.add_parser("check", help="verify the backend answers and the Reminders grant is in place")
     p = sub.add_parser("show", help="reminders in a list (open ones by default)")
     p.add_argument("list")
@@ -192,6 +193,19 @@ def main(argv):
         if a.verb == "lists":
             names = [n for n in rem("show-lists").splitlines() if n]
             emit(names) if a.json else print("\n".join(names))
+
+        elif a.verb == "snapshot":
+            names = [n for n in rem("show-lists").splitlines() if n]
+            rs = [normalize(r) for r in rem_json("show-all", "--format", "json")]
+            counts = {}
+            for r in rs:
+                counts[r["list"]] = counts.get(r["list"], 0) + 1
+            snap = {"lists": [{"name": n, "open": counts.get(n, 0)} for n in names], "reminders": rs}
+            if a.json:
+                emit(snap)
+            else:
+                for l in snap["lists"]:
+                    print("%-30s %d" % (l["name"], l["open"]))
 
         elif a.verb == "check":
             t0 = time.time()
