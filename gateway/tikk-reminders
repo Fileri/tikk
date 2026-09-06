@@ -23,11 +23,9 @@ import glob
 import json
 import os
 import plistlib
-import shutil
 import sqlite3
 import subprocess
 import sys
-import tempfile
 import time
 
 # Looked up in this order; nothing user-writable earlier than the tool itself.
@@ -51,10 +49,12 @@ class ToolError(Exception):
 
 
 # ---- list metadata EventKit does not expose: groups, colours, emblems, sharing.
-# Read straight from Reminders' Core Data store (read-only, on a copy so the
-# WAL is never touched). Needs Full Disk Access for the ssh session; without
-# it, or if Apple changes the schema, we simply return {} and the client shows
-# a flat list. Nothing here is written, ever.
+# Read straight from Reminders' Core Data store, opened read-only in place
+# (`mode=ro`: sqlite takes a shared lock and reads the WAL, so the data is
+# current and nothing is written). If that fails we retry with `immutable=1`,
+# which reads the main file without locks and may lag behind the WAL. Needs
+# Full Disk Access for the ssh session; without it, or if Apple changes the
+# schema, we return {} and the client shows a flat list.
 STORE_GLOB = os.path.expanduser("~/Library/Group Containers/group.com.apple.reminders/Container_v1/Stores/Data-*.sqlite")
 
 
@@ -82,40 +82,40 @@ def emblem_of(raw):
     return str(raw)
 
 
+STORE_QUERY = ("select Z_PK, ZISGROUP, ZNAME, ZPARENTLIST, ZDADISPLAYORDER, ZBADGEEMBLEM, ZSHARINGSTATUS, ZCOLOR "
+               "from ZREMCDBASELIST where ZMARKEDFORDELETION=0 and ZNAME is not null and ZISGROUP is not null")
+
+
+def store_rows(store):
+    for params in ("mode=ro", "mode=ro&immutable=1"):
+        try:
+            con = sqlite3.connect("file:%s?%s" % (store, params), uri=True, timeout=1.0)
+            try:
+                return con.execute(STORE_QUERY).fetchall()
+            finally:
+                con.close()
+        except sqlite3.Error:
+            continue
+    return []
+
+
 def store_meta():
     """→ {"lists": {name: {group, color, emblem, shared, order}}, "groups": [{name, order}]}"""
     meta = {"lists": {}, "groups": []}
-    tmp = tempfile.mkdtemp(prefix="tikk-")
-    try:
-        for store in sorted(glob.glob(STORE_GLOB)):
-            base = os.path.join(tmp, "db.sqlite")
-            for ext in ("", "-wal", "-shm"):
-                if os.path.exists(store + ext):
-                    shutil.copy(store + ext, base + ext)
-                elif os.path.exists(base + ext):
-                    os.remove(base + ext)
-            try:
-                con = sqlite3.connect("file:%s?mode=ro" % base, uri=True)
-                rows = con.execute(
-                    "select Z_PK, ZISGROUP, ZNAME, ZPARENTLIST, ZDADISPLAYORDER, ZBADGEEMBLEM, ZSHARINGSTATUS, ZCOLOR "
-                    "from ZREMCDBASELIST where ZMARKEDFORDELETION=0 and ZNAME is not null and ZISGROUP is not null").fetchall()
-                con.close()
-            except Exception:
-                continue
-            by_pk = {r[0]: r for r in rows}
-            for pk, isgroup, name, parent, order, emblem, shared, color in rows:
-                if isgroup:
-                    meta["groups"].append({"name": name, "order": order or 0})
-                else:
-                    meta["lists"][name] = {
-                        "group": by_pk[parent][2] if parent in by_pk else None,
-                        "color": plist_color(color) if color else None,
-                        "emblem": emblem_of(emblem),
-                        "shared": bool(shared),
-                        "order": order or 0,
-                    }
-    finally:
-        shutil.rmtree(tmp, ignore_errors=True)
+    for store in sorted(glob.glob(STORE_GLOB)):
+        rows = store_rows(store)
+        by_pk = {r[0]: r for r in rows}
+        for pk, isgroup, name, parent, order, emblem, shared, color in rows:
+            if isgroup:
+                meta["groups"].append({"name": name, "order": order or 0})
+            else:
+                meta["lists"][name] = {
+                    "group": by_pk[parent][2] if parent in by_pk else None,
+                    "color": plist_color(color) if color else None,
+                    "emblem": emblem_of(emblem),
+                    "shared": bool(shared),
+                    "order": order or 0,
+                }
     meta["groups"].sort(key=lambda g: g["order"])
     return meta
 
@@ -128,11 +128,17 @@ def find_tool():
                     % ", ".join(CANDIDATES))
 
 
-def rem(*args):
-    """Run reminders-cli; return stdout. Maps its failure modes to exit codes."""
-    cmd = [find_tool()] + list(args)
+def rem(subcommand, options=(), positionals=()):
+    """Run one reminders-cli subcommand; return stdout. Maps its failure modes to exit codes.
+
+    Options go first and positionals after a literal "--", so a list or
+    reminder called "--format" or "-h" is data, never a flag. Option values
+    use the --name=value form for the same reason.
+    """
+    cmd = [find_tool(), subcommand] + list(options) + ["--"] + list(positionals)
     try:
-        p = subprocess.run(cmd, capture_output=True, text=True, timeout=PROC_TIMEOUT)
+        p = subprocess.run(cmd, stdin=subprocess.DEVNULL, capture_output=True,
+                           encoding="utf-8", errors="replace", timeout=PROC_TIMEOUT)
     except subprocess.TimeoutExpired:
         raise ToolError(EX_UNAVAILABLE, "reminders-cli did not return within %ds" % PROC_TIMEOUT)
     if p.returncode == 0:
@@ -149,8 +155,8 @@ def rem(*args):
     raise ToolError(EX_UNAVAILABLE, err or "reminders-cli failed with exit %d" % p.returncode)
 
 
-def rem_json(*args):
-    out = rem(*args)
+def rem_json(subcommand, options=(), positionals=()):
+    out = rem(subcommand, list(options) + ["--format=json"], positionals)
     try:
         return json.loads(out)
     except ValueError:
@@ -158,14 +164,29 @@ def rem_json(*args):
 
 
 def local_iso(utc_iso):
-    """'2026-09-10T16:00:00Z' → ('2026-09-10T18:00:00+02:00', allday?) in the Mac's zone."""
+    """'2026-09-10T16:00:00Z' → ('2026-09-10T18:00:00+02:00', allday?) in the Mac's zone.
+
+    Tolerates fractional seconds and a numeric offset; anything unparseable
+    comes back as (None, False) rather than failing the whole verb.
+    """
     if not utc_iso:
         return None, False
-    d = dt.datetime.strptime(utc_iso, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=dt.timezone.utc).astimezone()
-    return d.isoformat(), (d.hour, d.minute, d.second) == (0, 0, 0)
+    s = str(utc_iso).strip()
+    if s.endswith("Z"):
+        s = s[:-1] + "+00:00"
+    try:
+        d = dt.datetime.fromisoformat(s)
+    except ValueError:
+        return None, False
+    if d.tzinfo is None:
+        d = d.replace(tzinfo=dt.timezone.utc)
+    d = d.astimezone()
+    return d.isoformat(timespec="seconds"), (d.hour, d.minute, d.second) == (0, 0, 0)
 
 
 def normalize(r):
+    if not isinstance(r, dict) or "externalId" not in r or "title" not in r:
+        raise ToolError(EX_UNAVAILABLE, "reminders-cli returned a record without externalId/title")
     due, allday = local_iso(r.get("dueDate"))
     done, _ = local_iso(r.get("completionDate"))
     return {
@@ -183,7 +204,7 @@ def normalize(r):
 
 def fetch(list_name, mode):
     flags = {"open": [], "done": ["--only-completed"], "all": ["--include-completed"]}[mode]
-    return [normalize(r) for r in rem_json("show", list_name, "--format", "json", *flags)]
+    return [normalize(r) for r in rem_json("show", flags, [list_name])]
 
 
 def resolve(list_name, key, mode):
@@ -231,11 +252,19 @@ def print_reminders(rs):
         print("    %s" % r["id"])
 
 
+class Parser(argparse.ArgumentParser):
+    """argparse exits 2 on bad usage; the gateway speaks sysexits (64)."""
+    def error(self, message):
+        sys.stderr.write("tikk: %s\n" % message)
+        sys.exit(EX_USAGE)
+
+
 def main(argv):
     want_json = "--json" in argv  # accepted anywhere: "--json show L" and "show L --json"
     argv = [x for x in argv if x != "--json"]
 
-    ap = argparse.ArgumentParser(prog="tikk-reminders", description=__doc__.splitlines()[0])
+    ap = Parser(prog="tikk-reminders", description=__doc__.splitlines()[0],
+                epilog="Names that start with '-' go after a literal '--', e.g.: add Groceries -- '-dash first'")
     ap.add_argument("--json", action="store_true", help="machine-readable output")
     sub = ap.add_subparsers(dest="verb", required=True)
     sub.add_parser("lists", help="names of all reminder lists")
@@ -271,7 +300,7 @@ def main(argv):
 
         elif a.verb == "snapshot":
             names = [n for n in rem("show-lists").splitlines() if n]
-            rs = [normalize(r) for r in rem_json("show-all", "--format", "json")]
+            rs = [normalize(r) for r in rem_json("show-all")]
             counts = {}
             for r in rs:
                 counts[r["list"]] = counts.get(r["list"], 0) + 1
@@ -304,19 +333,28 @@ def main(argv):
             emit(rs) if a.json else print_reminders(rs)
 
         elif a.verb == "add":
-            args = ["add", a.list, a.name, "--format", "json", "--priority", PRIORITY_NAMES[a.priority]]
+            opts = ["--priority=" + PRIORITY_NAMES[a.priority]]
             if a.body:
-                args += ["--notes", a.body]
+                opts.append("--notes=" + a.body)
             if a.due:
-                args += ["--due-date", parse_due(a.due)]
-            r = normalize(rem_json(*args))
+                opts.append("--due-date=" + parse_due(a.due))
+            r = normalize(rem_json("add", opts, [a.list, a.name]))
             emit(r) if a.json else print(r["id"])
 
         else:  # complete / uncomplete / delete
             r = resolve(a.list, a.key, a.mode)
             if a.verb == "delete" and r["completed"]:
-                rem("uncomplete", a.list, r["id"])  # reminders-cli's delete only sees open reminders
-            rem(a.verb, a.list, r["id"])
+                # reminders-cli's delete only sees open reminders: uncomplete first,
+                # and put it back if the delete then fails, so we never leave a
+                # side effect behind on error.
+                rem("uncomplete", (), [a.list, r["id"]])
+                try:
+                    rem("delete", (), [a.list, r["id"]])
+                except ToolError:
+                    rem("complete", (), [a.list, r["id"]])
+                    raise
+            else:
+                rem(a.verb, (), [a.list, r["id"]])
             emit({"id": r["id"], a.verb + "d": True}) if a.json else print(r["id"])
 
     except ValueError as e:
