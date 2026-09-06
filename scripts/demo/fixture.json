@@ -1,0 +1,289 @@
+{
+ "lists": [
+  {
+   "name": "Errands",
+   "open": 2,
+   "group": null,
+   "color": "#ff9f0a",
+   "emblem": "shopping1",
+   "shared": true,
+   "order": 0
+  },
+  {
+   "name": "Inbox",
+   "open": 2,
+   "group": "Work",
+   "color": null,
+   "emblem": "default",
+   "shared": false,
+   "order": 0
+  },
+  {
+   "name": "Projects",
+   "open": 2,
+   "group": "Work",
+   "color": "#5e5ce6",
+   "emblem": null,
+   "shared": false,
+   "order": 1
+  },
+  {
+   "name": "Reading",
+   "open": 1,
+   "group": "Work",
+   "color": "#ac8e68",
+   "emblem": "📚",
+   "shared": false,
+   "order": 2
+  },
+  {
+   "name": "Groceries",
+   "open": 5,
+   "group": "Home",
+   "color": "#30d158",
+   "emblem": "shopping1",
+   "shared": true,
+   "order": 0
+  },
+  {
+   "name": "Household",
+   "open": 2,
+   "group": "Home",
+   "color": "#ff453a",
+   "emblem": "🏠",
+   "shared": false,
+   "order": 1
+  },
+  {
+   "name": "Garden",
+   "open": 2,
+   "group": "Home",
+   "color": "#64d2ff",
+   "emblem": "nature2",
+   "shared": false,
+   "order": 2
+  }
+ ],
+ "groups": [
+  {
+   "name": "Work",
+   "lists": [
+    "Inbox",
+    "Projects",
+    "Reading"
+   ]
+  },
+  {
+   "name": "Home",
+   "lists": [
+    "Groceries",
+    "Household",
+    "Garden"
+   ]
+  }
+ ],
+ "reminders": [
+  {
+   "id": "D1",
+   "name": "Oat milk",
+   "body": null,
+   "due": null,
+   "allday": false,
+   "priority": 0,
+   "completed": false,
+   "completed_at": null,
+   "list": "Groceries"
+  },
+  {
+   "id": "D2",
+   "name": "Coffee beans",
+   "body": "the light roast from the corner shop",
+   "due": "2026-09-06T18:00:00+02:00",
+   "allday": false,
+   "priority": 1,
+   "completed": false,
+   "completed_at": null,
+   "list": "Groceries"
+  },
+  {
+   "id": "D3",
+   "name": "Sourdough",
+   "body": null,
+   "due": null,
+   "allday": false,
+   "priority": 0,
+   "completed": false,
+   "completed_at": null,
+   "list": "Groceries"
+  },
+  {
+   "id": "D4",
+   "name": "Bananas",
+   "body": null,
+   "due": null,
+   "allday": false,
+   "priority": 0,
+   "completed": false,
+   "completed_at": null,
+   "list": "Groceries"
+  },
+  {
+   "id": "D5",
+   "name": "Dish soap",
+   "body": null,
+   "due": null,
+   "allday": false,
+   "priority": 9,
+   "completed": false,
+   "completed_at": null,
+   "list": "Groceries"
+  },
+  {
+   "id": "D6",
+   "name": "Change furnace filter",
+   "body": null,
+   "due": "2026-09-12T00:00:00+02:00",
+   "allday": true,
+   "priority": 0,
+   "completed": false,
+   "completed_at": null,
+   "list": "Household"
+  },
+  {
+   "id": "D7",
+   "name": "Call the plumber about the drip",
+   "body": null,
+   "due": "2026-09-05T00:00:00+02:00",
+   "allday": true,
+   "priority": 5,
+   "completed": false,
+   "completed_at": null,
+   "list": "Household"
+  },
+  {
+   "id": "D8",
+   "name": "Water the tomatoes",
+   "body": null,
+   "due": "2026-09-06T00:00:00+02:00",
+   "allday": true,
+   "priority": 0,
+   "completed": false,
+   "completed_at": null,
+   "list": "Garden"
+  },
+  {
+   "id": "D9",
+   "name": "Order seeds for autumn",
+   "body": null,
+   "due": null,
+   "allday": false,
+   "priority": 0,
+   "completed": false,
+   "completed_at": null,
+   "list": "Garden"
+  },
+  {
+   "id": "D10",
+   "name": "Reply to Sam about the offsite",
+   "body": null,
+   "due": "2026-09-06T15:00:00+02:00",
+   "allday": false,
+   "priority": 1,
+   "completed": false,
+   "completed_at": null,
+   "list": "Inbox"
+  },
+  {
+   "id": "D11",
+   "name": "Renew the domain",
+   "body": null,
+   "due": "2026-09-20T00:00:00+02:00",
+   "allday": true,
+   "priority": 0,
+   "completed": false,
+   "completed_at": null,
+   "list": "Inbox"
+  },
+  {
+   "id": "D12",
+   "name": "Write the Q4 plan outline",
+   "body": "three pages, no slides",
+   "due": null,
+   "allday": false,
+   "priority": 0,
+   "completed": false,
+   "completed_at": null,
+   "list": "Projects"
+  },
+  {
+   "id": "D13",
+   "name": "Review the design doc",
+   "body": null,
+   "due": "2026-09-09T10:00:00+02:00",
+   "allday": false,
+   "priority": 0,
+   "completed": false,
+   "completed_at": null,
+   "list": "Projects"
+  },
+  {
+   "id": "D14",
+   "name": "Finish 'The Design of Everyday Things'",
+   "body": null,
+   "due": null,
+   "allday": false,
+   "priority": 0,
+   "completed": false,
+   "completed_at": null,
+   "list": "Reading"
+  },
+  {
+   "id": "D15",
+   "name": "Pick up the parcel",
+   "body": null,
+   "due": "2026-09-06T17:00:00+02:00",
+   "allday": false,
+   "priority": 0,
+   "completed": false,
+   "completed_at": null,
+   "list": "Errands"
+  },
+  {
+   "id": "D16",
+   "name": "Return library books",
+   "body": null,
+   "due": null,
+   "allday": false,
+   "priority": 0,
+   "completed": false,
+   "completed_at": null,
+   "list": "Errands"
+  }
+ ],
+ "done": {
+  "Groceries": [
+   {
+    "id": "X1",
+    "name": "Eggs",
+    "body": null,
+    "due": null,
+    "allday": false,
+    "priority": 0,
+    "completed": true,
+    "completed_at": "2026-09-06T09:12:00+02:00",
+    "list": "Groceries"
+   },
+   {
+    "id": "X2",
+    "name": "Butter",
+    "body": null,
+    "due": null,
+    "allday": false,
+    "priority": 0,
+    "completed": true,
+    "completed_at": "2026-09-05T18:40:00+02:00",
+    "list": "Groceries"
+   }
+  ]
+ }
+}

@@ -7,6 +7,17 @@ Mac you own over one tightly confined SSH key.
 > Status: in daily use on the author's desk. Gateway measured and stable;
 > plugin in its first weeks. Issues and feedback welcome.
 
+<p align="center">
+  <img src="docs/img/window.png" alt="tikk window: sidebar with Today / Scheduled / All, lists in their groups, and a Groceries list with tick circles" width="820">
+</p>
+<p align="center">
+  <img src="docs/img/panel.png" alt="tikk panel under the Omarchy bar: the Groceries list with an add field" width="380">
+</p>
+
+*Screenshots use the bundled demo fixture (`scripts/demo/fixture.json`); set
+`"demo": "/path/to/fixture.json"` on the widget's `shell.json` entry to run
+the UI without a Mac.*
+
 ## Why a Mac is in the loop
 
 iCloud Reminders have had no server API since the 2019 "upgrade": they live

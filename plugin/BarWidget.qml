@@ -38,6 +38,12 @@ BarWidget {
 
   readonly property int openCount: items.length
   readonly property string configuredList: String(setting("list", ""))
+  // Demo mode: `"demo": "/path/to/fixture.json"` in the widget's shell.json
+  // entry feeds the poller from a file and turns writes into local no-ops.
+  // For screenshots and UI work without a Mac (scripts/demo/fixture.json).
+  readonly property string demoPath: String(setting("demo", ""))
+  readonly property bool demo: demoPath !== ""
+  property var demoDone: ({})
 
   // ---- panel plumbing (same contract as the first-party widgets)
   function injectPanel() {
@@ -73,7 +79,7 @@ BarWidget {
   }
   Process {
     id: poll
-    command: [root.shim, "snapshot", "--json"]
+    command: root.demo ? ["cat", root.demoPath] : [root.shim, "snapshot", "--json"]
     property string err: ""
     stderr: StdioCollector { onStreamFinished: poll.err = text.trim().split("\n").pop() || "" }
     stdout: StdioCollector {
@@ -85,6 +91,7 @@ BarWidget {
             root.lists = snap.lists
             root.groups = snap.groups || []
             root.all = snap.reminders
+            if (root.demo) root.demoDone = snap.done || {}
             if (root.list === "" && snap.lists.length > 0)
               root.list = root.configuredList !== "" ? root.configuredList : snap.lists[0].name
             root.deriveItems()
@@ -103,6 +110,7 @@ BarWidget {
   function loadDone(listName) {
     doneList = listName
     if (listName === "") { done = []; return }
+    if (demo) { done = demoDone[listName] || []; return }
     if (doneProc.running) return
     doneLoading = true
     doneProc.command = [shim, "show", listName, "--done", "--json"]
@@ -123,7 +131,7 @@ BarWidget {
 
   // ---- writes: one at a time, then re-poll. Never called from a timer.
   property var actQueue: []
-  function act(args) { actQueue = actQueue.concat([args]); pumpAct() }
+  function act(args) { if (demo) return; actQueue = actQueue.concat([args]); pumpAct() }
   function pumpAct() {
     if (actProc.running || actQueue.length === 0) return
     var next = actQueue[0]; actQueue = actQueue.slice(1)
