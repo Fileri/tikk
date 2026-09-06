@@ -13,14 +13,42 @@ in tikk-reminders' argument parsing can never widen what the key may do.
 
 Modelled on blip-dispatch (nixfred/blip, MIT).
 """
+import datetime
+import json
 import os
 import shlex
 import sys
 
 VERBS = {"lists", "show", "snapshot", "add", "complete", "uncomplete", "delete", "check"}
+AUDIT = os.path.expanduser("~/.tikk/audit.log")   # refusals land next to the verb tool's write log
 
 
-def refuse(msg):
+def audit_refusal(raw, why):
+    """One line per refused command, 0600, never fatal. Same file and shape as tikk-reminders' log."""
+    if os.path.exists(os.path.expanduser("~/.tikk/config")):
+        try:
+            with open(os.path.expanduser("~/.tikk/config"), encoding="utf-8") as f:
+                for line in f:
+                    k, _, v = line.split("#", 1)[0].partition("=")
+                    if k.strip() == "audit_log" and v.strip().lower() in ("off", "no", "false", ""):
+                        return
+        except OSError:
+            pass
+    client = (os.environ.get("SSH_CLIENT") or "local").split()[0]
+    line = "%s client=%s event=refused why=%s cmd=%s\n" % (
+        datetime.datetime.now().astimezone().isoformat(timespec="seconds"), client,
+        json.dumps(why), json.dumps(raw[:200], ensure_ascii=False))
+    try:
+        os.makedirs(os.path.dirname(AUDIT), mode=0o700, exist_ok=True)
+        fd = os.open(AUDIT, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+        with os.fdopen(fd, "a", encoding="utf-8") as f:
+            f.write(line)
+    except OSError:
+        pass
+
+
+def refuse(msg, raw=""):
+    audit_refusal(raw, msg)
     sys.stderr.write("tikk-dispatch: %s\n" % msg)
     sys.exit(64)  # EX_USAGE
 
@@ -32,16 +60,16 @@ def main():
     try:
         argv = shlex.split(raw)
     except ValueError as e:
-        refuse("unparseable command: %s" % e)
+        refuse("unparseable command: %s" % e, raw)
     if not argv:
-        refuse("empty command")
+        refuse("empty command", raw)
     if argv == ["ping"]:  # connectivity probe, no AppleScript involved
         print("pong")
         return
     words = [a for a in argv if a != "--json"]  # --json may lead or trail the verb
     verb = words[0] if words else ""
     if verb not in VERBS:
-        refuse("'%s' is not a tikk verb" % verb)
+        refuse("'%s' is not a tikk verb" % verb, raw)
     bindir = os.path.dirname(os.path.realpath(__file__))
     # Fixed, system-only PATH: nothing user-writable can shadow osascript/pkill/open.
     os.environ["PATH"] = "/usr/bin:/bin:/usr/sbin:/sbin"

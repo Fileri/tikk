@@ -35,6 +35,8 @@ CANDIDATES = [
     "/usr/local/bin/reminders",
 ]
 PROC_TIMEOUT = 30
+CONFIG_PATH = os.path.expanduser("~/.tikk/config")
+DEFAULT_AUDIT = os.path.expanduser("~/.tikk/audit.log")
 
 # sysexits.h
 EX_USAGE, EX_DATAERR, EX_NOINPUT, EX_UNAVAILABLE, EX_NOPERM, EX_CONFIG = 64, 65, 66, 69, 77, 78
@@ -46,6 +48,58 @@ class ToolError(Exception):
     def __init__(self, code, message):
         Exception.__init__(self, message)
         self.code = code
+
+
+# ---- gateway config: ~/.tikk/config, key = value, parsed not sourced.
+#   allow_lists = Groceries, Household   # the key may only see/touch these (default: all)
+#   audit_log   = ~/.tikk/audit.log      # every write and every refusal (default); "off" disables
+def read_config(path=CONFIG_PATH):
+    cfg = {"allow_lists": None, "audit_log": DEFAULT_AUDIT}
+    try:
+        with open(path, encoding="utf-8") as f:
+            lines = f.read().splitlines()
+    except OSError:
+        return cfg
+    for line in lines:
+        line = line.split("#", 1)[0].strip()
+        if "=" not in line:
+            continue
+        k, v = (x.strip() for x in line.split("=", 1))
+        if k == "allow_lists":
+            names = [n.strip() for n in v.split(",") if n.strip()]
+            cfg["allow_lists"] = names or None
+        elif k == "audit_log":
+            cfg["audit_log"] = None if v.lower() in ("off", "no", "false", "") else os.path.expanduser(v)
+    return cfg
+
+
+def audit(cfg, event, **fields):
+    """Append one line to the audit log (0600). Never raises: logging must not break a verb."""
+    path = cfg.get("audit_log")
+    if not path:
+        return
+    client = (os.environ.get("SSH_CLIENT") or os.environ.get("SSH_CONNECTION") or "local").split()[0]
+    parts = [dt.datetime.now().astimezone().isoformat(timespec="seconds"), "client=" + client, "event=" + event]
+    for k, v in fields.items():
+        if v is None:
+            continue
+        parts.append("%s=%s" % (k, json.dumps(str(v), ensure_ascii=False)))
+    try:
+        os.makedirs(os.path.dirname(path), mode=0o700, exist_ok=True)
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+        with os.fdopen(fd, "a", encoding="utf-8") as f:
+            f.write(" ".join(parts) + "\n")
+    except OSError:
+        pass
+
+
+def allowed(cfg, list_name):
+    return cfg["allow_lists"] is None or list_name in cfg["allow_lists"]
+
+
+def require_allowed(cfg, list_name):
+    if not allowed(cfg, list_name):
+        raise ToolError(EX_NOPERM, "list %r is not in allow_lists on the gateway" % list_name)
 
 
 # ---- list metadata EventKit does not expose: groups, colours, emblems, sharing.
@@ -289,18 +343,23 @@ def main(argv):
         p.set_defaults(mode=mode)
     a = ap.parse_args(argv)
     a.json = want_json
+    cfg = read_config()
 
     log = lambda m: sys.stderr.write("tikk: %s\n" % m)
     emit = lambda obj: print(json.dumps(obj, ensure_ascii=False))
+    WRITE_VERBS = ("add", "complete", "uncomplete", "delete")
 
     try:
+        if a.verb in WRITE_VERBS or a.verb == "show":
+            require_allowed(cfg, a.list)
+
         if a.verb == "lists":
-            names = [n for n in rem("show-lists").splitlines() if n]
+            names = [n for n in rem("show-lists").splitlines() if n and allowed(cfg, n)]
             emit(names) if a.json else print("\n".join(names))
 
         elif a.verb == "snapshot":
-            names = [n for n in rem("show-lists").splitlines() if n]
-            rs = [normalize(r) for r in rem_json("show-all")]
+            names = [n for n in rem("show-lists").splitlines() if n and allowed(cfg, n)]
+            rs = [r for r in (normalize(x) for x in rem_json("show-all")) if allowed(cfg, r["list"])]
             counts = {}
             for r in rs:
                 counts[r["list"]] = counts.get(r["list"], 0) + 1
@@ -314,6 +373,7 @@ def main(argv):
                 lists.append({"name": n, "open": counts.get(n, 0), "group": m.get("group"), "color": m.get("color"),
                               "emblem": m.get("emblem"), "shared": m.get("shared", False), "order": m.get("order", 0)})
             groups = [{"name": g["name"], "lists": [l["name"] for l in lists if l["group"] == g["name"]]} for g in meta["groups"]]
+            groups = [g for g in groups if g["lists"]]
             snap = {"lists": lists, "groups": groups, "reminders": rs}
             if a.json:
                 emit(snap)
@@ -323,10 +383,18 @@ def main(argv):
 
         elif a.verb == "check":
             t0 = time.time()
-            n = len([n for n in rem("show-lists").splitlines() if n])
+            n = len([n for n in rem("show-lists").splitlines() if n and allowed(cfg, n)])
             ms = int((time.time() - t0) * 1000)
-            info = {"ok": True, "lists": n, "ms": ms, "backend": "eventkit", "tool": find_tool()}
-            emit(info) if a.json else print("ok: %d lists in %d ms via %s" % (n, ms, info["tool"]))
+            info = {"ok": True, "lists": n, "ms": ms, "backend": "eventkit", "tool": find_tool(),
+                    "store_meta": bool(store_meta()["lists"]), "allow_lists": cfg["allow_lists"],
+                    "audit_log": cfg["audit_log"]}
+            if a.json:
+                emit(info)
+            else:
+                print("ok: %d lists in %d ms via %s" % (n, ms, info["tool"]))
+                print("    groups/colours from the Reminders store: %s" % ("yes" if info["store_meta"] else "no (needs Full Disk Access)"))
+                print("    allow_lists: %s" % (", ".join(cfg["allow_lists"]) if cfg["allow_lists"] else "all lists"))
+                print("    audit log: %s" % (cfg["audit_log"] or "off"))
 
         elif a.verb == "show":
             rs = fetch(a.list, "done" if a.done else ("all" if a.all else "open"))
@@ -339,6 +407,7 @@ def main(argv):
             if a.due:
                 opts.append("--due-date=" + parse_due(a.due))
             r = normalize(rem_json("add", opts, [a.list, a.name]))
+            audit(cfg, "add", list=a.list, id=r["id"], name=r["name"], due=r["due"], priority=r["priority"])
             emit(r) if a.json else print(r["id"])
 
         else:  # complete / uncomplete / delete
@@ -355,12 +424,16 @@ def main(argv):
                     raise
             else:
                 rem(a.verb, (), [a.list, r["id"]])
+            audit(cfg, a.verb, list=a.list, id=r["id"], name=r["name"])
             emit({"id": r["id"], a.verb + "d": True}) if a.json else print(r["id"])
 
     except ValueError as e:
         log(str(e))
         return EX_USAGE
     except ToolError as e:
+        if a.verb in WRITE_VERBS:
+            audit(cfg, a.verb + "-failed", list=getattr(a, "list", None), key=getattr(a, "key", None) or getattr(a, "name", None),
+                  code=e.code, error=str(e)[:200])
         log(str(e))
         return e.code
     return 0
