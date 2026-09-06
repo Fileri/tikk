@@ -199,6 +199,7 @@ BarWidget {
     function hide(): void { root.close() }
     function toggle(): void { root.toggle() }
     function app(): string { return root.app() }
+    function open_list(name: string): string { root.openList(name); return "ok" }
     function refresh(): string { root.refresh(); return "ok" }
     function add(name: string): string {
       if (!root.online) return "offline"
@@ -231,6 +232,11 @@ BarWidget {
     function onVisibleChanged() { if (windowLoader.item && !windowLoader.item.visible) Qt.callLater(function() { windowLoader.active = false }) }
   }
   readonly property bool appOpen: windowLoader.active && windowLoader.item !== null && windowLoader.item.visible
+  property string pendingList: ""      // list to show when the window comes up (IPC open_list)
+  function openList(name) {
+    if (appOpen) windowLoader.item.showList(name)
+    else { pendingList = name; windowLoader.active = true }
+  }
   function app() {
     var wasOpen = appOpen
     if (wasOpen) windowLoader.item.visible = false   // → Connections tears it down

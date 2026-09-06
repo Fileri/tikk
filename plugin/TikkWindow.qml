@@ -152,6 +152,38 @@ FloatingWindow {
   }
   readonly property var doneRows: (host && kind === "list" && showDone && host.doneList === listName) ? host.done : []
   readonly property var rows: openRows.concat(doneRows)
+  // In a real list, order as Reminders.app does: unsectioned first, then each
+  // section in the list's own order; inside, the manual position. Headings are
+  // rows the cursor skips. Smart lists keep the due-date order without headings.
+  readonly property var sectionNames: (kind === "list" && listMeta(listName)) ? (listMeta(listName).sections || []) : []
+  readonly property var displayRows: {
+    if (kind !== "list") return rows.map(function(r) { return { type: "reminder", r: r } })
+    var byPos = function(a, b) {
+      var pa = a.position === null || a.position === undefined ? 1e9 : a.position
+      var pb = b.position === null || b.position === undefined ? 1e9 : b.position
+      return pa !== pb ? pa - pb : String(a.name).localeCompare(String(b.name))
+    }
+    var out = [], names = sectionNames
+    var loose = openRows.filter(function(r) { return !r.section || names.indexOf(r.section) < 0 }).sort(byPos)
+    for (var i = 0; i < loose.length; i++) out.push({ type: "reminder", r: loose[i] })
+    for (var s = 0; s < names.length; s++) {
+      var members = openRows.filter(function(r) { return r.section === names[s] }).sort(byPos)
+      if (members.length === 0 && !showDone) continue
+      out.push({ type: "heading", name: names[s], count: members.length })
+      for (i = 0; i < members.length; i++) out.push({ type: "reminder", r: members[i] })
+    }
+    if (doneRows.length > 0) {
+      out.push({ type: "heading", name: "Completed", count: doneRows.length })
+      for (i = 0; i < doneRows.length; i++) out.push({ type: "reminder", r: doneRows[i] })
+    }
+    return out
+  }
+  function isReminderRow(i) { return i >= 0 && i < displayRows.length && displayRows[i].type === "reminder" }
+  function nearestReminderRow(i, dir) {   // first reminder row at/after (dir>0) or at/before (dir<0) i, or -1
+    for (var k = i; k >= 0 && k < displayRows.length; k += dir) if (displayRows[k].type === "reminder") return k
+    return -1
+  }
+  function cursorRecord() { return isReminderRow(cursor) ? displayRows[cursor].r : null }
   readonly property int todayCount: host ? host.all.filter(isToday).length : 0
   readonly property int scheduledCount: host ? host.all.filter(function(r) { return !!r.due }).length : 0
   readonly property int allCount: host ? host.all.length : 0
@@ -199,13 +231,16 @@ FloatingWindow {
   }
   function moveList(dy) {
     if (rows.length === 0) return
-    cursor = Math.max(0, Math.min(rows.length - 1, cursor + dy))
+    var next = nearestReminderRow(cursor + dy, dy > 0 ? 1 : -1)
+    if (next < 0) next = nearestReminderRow(cursor, dy > 0 ? -1 : 1)
+    if (next >= 0) cursor = next
     mainList.positionViewAtIndex(cursor, ListView.Contain)
   }
+  onDisplayRowsChanged: if (!isReminderRow(cursor)) { var n = nearestReminderRow(cursor, 1); cursor = n >= 0 ? n : Math.max(0, nearestReminderRow(cursor, -1)) }
   function moveCursor(dy) { region === "sidebar" ? moveSide(dy) : moveList(dy) }
   function jumpEnd(toEnd) {
     if (region === "sidebar") { sideCursor = toEnd ? sideItems.length - 1 : 0; var it = sideItems[sideCursor]; if (it && it.type !== "group") selectSideItem(sideCursor) }
-    else { cursor = toEnd ? Math.max(0, rows.length - 1) : 0; mainList.positionViewAtIndex(cursor, ListView.Contain) }
+    else { cursor = Math.max(0, toEnd ? nearestReminderRow(displayRows.length - 1, -1) : nearestReminderRow(0, 1)); mainList.positionViewAtIndex(cursor, ListView.Contain) }
   }
   function goLeft() {
     if (region === "list") { syncSideCursor(); focusRegion("sidebar"); return }
@@ -230,8 +265,8 @@ FloatingWindow {
     else tickCursor()
   }
   function tick(r) { if (!host || String(r.id).indexOf("pending-") === 0) return; if (r.completed) host.uncomplete(r); else host.complete(r) }
-  function tickCursor() { if (rows.length > 0) { tick(rows[cursor]); cursor = Math.max(0, Math.min(cursor, rows.length - 2)) } }
-  function deleteCursor() { if (region === "list" && rows.length > 0 && host && host.canDelete) { host.remove(rows[cursor]); cursor = Math.max(0, Math.min(cursor, rows.length - 2)) } }
+  function tickCursor() { var r = cursorRecord(); if (r) tick(r) }
+  function deleteCursor() { var r = cursorRecord(); if (region === "list" && r && host && host.canDelete) host.remove(r) }
   function jumpDigit(n) { var t = digitTargets[n - 1]; if (!t) return; if (t.type === "smart") select(t.k); else select("list", t.list.name); if (region === "new") focusRegion("list") }
   function submitNew() {
     var t = newField.text; newField.text = ""
@@ -239,17 +274,23 @@ FloatingWindow {
   }
   function leaveFieldToList() {
     if (rows.length === 0) { syncSideCursor(); focusRegion("sidebar"); return }
-    cursor = rows.length - 1
+    cursor = Math.max(0, nearestReminderRow(displayRows.length - 1, -1))
     mainList.positionViewAtIndex(cursor, ListView.Contain)
     focusRegion("list")
   }
+  // IPC / keybinds: open straight on a list
+  function showList(name) { select("list", name); syncSideCursor(); Qt.callLater(function() { focusRegion(rows.length === 0 ? "sidebar" : "list") }) }
   function unwind() {
     if (region === "new") { newField.text = ""; focusRegion("list"); return }
     win.visible = false
   }
   // Open with focus in the sidebar, on the current selection: arrows browse
   // lists immediately, Enter or → goes in. Same whether the list is empty or not.
-  onVisibleChanged: if (visible) { if (listName === "" && host) listName = host.list; syncSideCursor(); Qt.callLater(function() { syncSideCursor(); focusRegion("sidebar") }) }
+  onVisibleChanged: if (visible) {
+    if (listName === "" && host) listName = host.list
+    if (host && host.pendingList) { var n = host.pendingList; host.pendingList = ""; select("list", n) }
+    syncSideCursor(); Qt.callLater(function() { syncSideCursor(); focusRegion("sidebar") })
+  }
 
   // ------------------------------------------------------------ keys
   FocusScope {
@@ -493,20 +534,40 @@ FloatingWindow {
             Layout.fillWidth: true
             Layout.fillHeight: true
             clip: true
-            model: win.rows
+            model: win.displayRows
             spacing: 0
             delegate: Item {
               required property var modelData
               required property int index
-              readonly property bool selected: index === win.cursor
+              readonly property bool isHeading: modelData.type === "heading"
+              readonly property var rec: isHeading ? ({}) : modelData.r
+              readonly property bool selected: !isHeading && index === win.cursor
               readonly property bool focused: selected && win.region === "list"
-              readonly property bool pending: String(modelData.id).indexOf("pending-") === 0
-              readonly property bool done: modelData.completed === true
-              readonly property string sub: [modelData.body || "", win.dueLabel(modelData)].filter(function(x) { return x !== "" }).join("  ·  ")
+              readonly property bool pending: !isHeading && String(rec.id).indexOf("pending-") === 0
+              readonly property bool done: !isHeading && rec.completed === true
+              readonly property string sub: isHeading ? "" : [rec.body || "", win.dueLabel(rec)].filter(function(x) { return x !== "" }).join("  ·  ")
               width: mainList.width
-              height: rowCol.implicitHeight + Style.spacing.rowPaddingX
+              height: isHeading ? headingText.implicitHeight + Style.spacing.rowPaddingX + Style.spacing.md : rowCol.implicitHeight + Style.spacing.rowPaddingX
               opacity: pending ? 0.5 : 1
+              // ---- section heading, like Reminders.app: bold, with the count, above a hairline
+              Text {
+                id: headingText
+                visible: isHeading
+                anchors.left: parent.left; anchors.right: parent.right; anchors.bottom: parent.bottom
+                anchors.leftMargin: Style.spacing.rowPaddingX / 2; anchors.bottomMargin: Style.spacing.md
+                text: isHeading ? modelData.name : ""
+                color: modelData.name === "Completed" ? win.muted : win.accent
+                font.family: win.fontFamily; font.pixelSize: Style.font.title; font.bold: true
+                elide: Text.ElideRight
+                Text {
+                  anchors.right: parent.right; anchors.baseline: parent.baseline
+                  text: isHeading ? modelData.count : ""
+                  color: win.muted
+                  font.family: win.fontFamily; font.pixelSize: Style.font.bodySmall
+                }
+              }
               Rectangle {
+                visible: !isHeading
                 anchors.fill: parent; radius: Style.cornerRadius
                 color: selected ? (win.region === "list" ? win.rowSelected : win.rowSelectedIdle) : (mm.containsMouse ? win.rowHover : "transparent")
                 border.width: focused ? win.focusWidth : 0
@@ -514,10 +575,11 @@ FloatingWindow {
               }
               Rectangle {   // separator like Reminders' hairlines
                 anchors.left: parent.left; anchors.right: parent.right; anchors.bottom: parent.bottom
-                anchors.leftMargin: Style.space(34); height: Style.spacing.hairline
+                anchors.leftMargin: isHeading ? 0 : Style.space(34); height: Style.spacing.hairline
                 color: win.hairline
               }
               RowLayout {
+                visible: !isHeading
                 anchors.fill: parent
                 anchors.leftMargin: Style.spacing.rowPaddingX / 2; anchors.rightMargin: Style.spacing.rowPaddingX / 2
                 spacing: Style.spacing.controlGap
@@ -530,7 +592,7 @@ FloatingWindow {
                   border.color: done || circleMouse.containsMouse ? win.accent : win.muted
                   Rectangle { anchors.centerIn: parent; width: parent.width - Style.space(6); height: width; radius: width / 2; color: win.accent; visible: !done && circleMouse.containsMouse }
                   Text { anchors.centerIn: parent; text: "✓"; color: win.onTint; visible: done; font.pixelSize: Style.font.caption; font.bold: true }
-                  MouseArea { id: circleMouse; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: win.tick(modelData) }
+                  MouseArea { id: circleMouse; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: win.tick(rec) }
                 }
                 ColumnLayout {
                   id: rowCol
@@ -539,18 +601,18 @@ FloatingWindow {
                   Text {
                     Layout.fillWidth: true
                     textFormat: Text.StyledText
-                    text: (modelData.priority === 1 ? "<font color='" + win.accent + "'>!!! </font>" : modelData.priority === 5 ? "<font color='" + win.accent + "'>!! </font>" : modelData.priority === 9 ? "<font color='" + win.accent + "'>! </font>" : "")
-                          + String(modelData.name).replace(/&/g, "&amp;").replace(/</g, "&lt;")
+                    text: isHeading ? "" : (rec.priority === 1 ? "<font color='" + win.accent + "'>!!! </font>" : rec.priority === 5 ? "<font color='" + win.accent + "'>!! </font>" : rec.priority === 9 ? "<font color='" + win.accent + "'>! </font>" : "")
+                          + String(rec.name).replace(/&/g, "&amp;").replace(/</g, "&lt;")
                     color: done ? win.muted : win.fg
                     font.family: win.fontFamily; font.pixelSize: Style.font.subtitle
                     font.strikeout: done
                     wrapMode: Text.Wrap
                   }
                   Text {
-                    visible: sub !== "" || win.kind !== "list"
+                    visible: !isHeading && (sub !== "" || win.kind !== "list")
                     Layout.fillWidth: true
-                    text: win.kind !== "list" ? [modelData.list, sub].filter(function(x) { return x !== "" }).join("  ·  ") : sub
-                    color: !done && win.isOverdue(modelData) ? win.urgent : win.muted
+                    text: isHeading ? "" : (win.kind !== "list" ? [rec.list, sub].filter(function(x) { return x !== "" }).join("  ·  ") : sub)
+                    color: !done && !isHeading && win.isOverdue(rec) ? win.urgent : win.muted
                     font.family: win.fontFamily; font.pixelSize: Style.font.bodySmall
                     elide: Text.ElideRight
                   }
@@ -561,13 +623,14 @@ FloatingWindow {
                   color: win.muted
                   font.pixelSize: Style.font.body
                   Layout.alignment: Qt.AlignVCenter
-                  MouseArea { anchors.fill: parent; anchors.margins: -Style.spacing.md; cursorShape: Qt.PointingHandCursor; onClicked: win.host.remove(modelData) }
+                  MouseArea { anchors.fill: parent; anchors.margins: -Style.spacing.md; cursorShape: Qt.PointingHandCursor; onClicked: win.host.remove(rec) }
                 }
               }
               MouseArea {
                 id: mm
                 anchors.fill: parent
-                hoverEnabled: true
+                hoverEnabled: !isHeading
+                enabled: !isHeading
                 z: -1
                 onClicked: { win.cursor = index; win.focusRegion("list") }
               }

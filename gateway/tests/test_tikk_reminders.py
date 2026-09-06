@@ -79,12 +79,24 @@ class StoreMeta(unittest.TestCase):
             import sqlite3
             p = os.path.join(d, "Data-x.sqlite")
             con = sqlite3.connect(p)
-            con.execute("create table ZREMCDBASELIST (Z_PK int, ZISGROUP int, ZNAME text, ZPARENTLIST int, ZDADISPLAYORDER int, ZBADGEEMBLEM text, ZSHARINGSTATUS int, ZCOLOR blob, ZMARKEDFORDELETION int)")
-            con.executemany("insert into ZREMCDBASELIST values (?,?,?,?,?,?,?,?,?)", [
-                (1, 1, "Home", None, 0, None, 0, None, 0),
-                (2, 0, "Groceries", 1, 0, "shopping1", 1, None, 0),
-                (3, 0, "Errands", None, 1, None, 0, None, 0),
-                (4, 0, "Deleted", None, 2, None, 0, None, 1),
+            con.execute("create table ZREMCDBASELIST (Z_PK int, ZISGROUP int, ZNAME text, ZPARENTLIST int, ZDADISPLAYORDER int, ZBADGEEMBLEM text, ZSHARINGSTATUS int, ZCOLOR blob, ZMARKEDFORDELETION int, ZSECTIONIDSORDERINGASDATA blob, ZMEMBERSHIPSOFREMINDERSINSECTIONSASDATA blob, ZREMINDERIDSMERGEABLEORDERING_V2_JSON blob)")
+            con.execute("create table ZREMCDBASESECTION (Z_PK int, ZLIST int, ZIDENTIFIER blob, ZDISPLAYNAME text, ZMARKEDFORDELETION int)")
+            import uuid
+            sec_a, sec_b = uuid.uuid4(), uuid.uuid4()
+            rid = "AAAAAAAA-0000-0000-0000-000000000001"
+            con.executemany("insert into ZREMCDBASELIST values (?,?,?,?,?,?,?,?,?,?,?,?)", [
+                (1, 1, "Home", None, 0, None, 0, None, 0, None, None, None),
+                (2, 0, "Groceries", 1, 0, "shopping1", 1, None, 0,
+                 json.dumps({"orderedIdentifiers": [str(sec_b), str(sec_a)]}).encode(),
+                 json.dumps({"memberships": [{"memberID": rid.lower(), "groupID": str(sec_a)}]}).encode(),
+                 json.dumps(["other", rid]).encode()),
+                (3, 0, "Errands", None, 1, None, 0, None, 0, None, None, None),
+                (4, 0, "Deleted", None, 2, None, 0, None, 1, None, None, None),
+            ])
+            con.executemany("insert into ZREMCDBASESECTION values (?,?,?,?,?)", [
+                (1, 2, sec_a.bytes, "Produce", 0),
+                (2, 2, sec_b.bytes, "Bakery", 0),
+                (3, 2, uuid.uuid4().bytes, "Gone", 1),
             ])
             con.commit(); con.close()
             meta = T.store_meta([p])
@@ -93,6 +105,12 @@ class StoreMeta(unittest.TestCase):
         self.assertTrue(meta["lists"]["Groceries"]["shared"])
         self.assertIsNone(meta["lists"]["Errands"]["group"])
         self.assertNotIn("Deleted", meta["lists"])
+        # sections: display order from the list blob, membership by reminder id, manual position
+        self.assertEqual(meta["lists"]["Groceries"]["sections"], ["Bakery", "Produce"])
+        self.assertEqual(meta["lists"]["Errands"]["sections"], [])
+        recs = T.decorate([{"id": rid, "list": "Groceries"}, {"id": "BBBBBBBB-0000-0000-0000-000000000002", "list": "Groceries"}], meta)
+        self.assertEqual((recs[0]["section"], recs[0]["position"]), ("Produce", 1))
+        self.assertEqual((recs[1]["section"], recs[1]["position"]), (None, None))
 
     def test_missing_store_is_empty(self):
         self.assertEqual(T.store_meta(["/nonexistent/Data-x.sqlite"]), {"lists": {}, "groups": []})
@@ -219,7 +237,7 @@ class Verbs(unittest.TestCase):
              mock.patch.object(T, "rem_json", return_value=[
                  {"externalId": "1", "title": "Milk", "list": "Groceries"},
                  {"externalId": "2", "title": "Plan", "list": "Work"}]), \
-             mock.patch.object(T, "store_meta", return_value={"lists": {"Groceries": {"group": "Home"}, "Work": {"group": "Office"}},
+             mock.patch.object(T, "safe_meta", return_value={"lists": {"Groceries": {"group": "Home"}, "Work": {"group": "Office"}},
                                                                "groups": [{"name": "Home", "order": 0}, {"name": "Office", "order": 1}]}):
             snap, _ = T.verb_snapshot(ns(), cfg)
         self.assertEqual([l["name"] for l in snap["lists"]], ["Groceries"])

@@ -45,8 +45,9 @@ deliberately out of scope. Writes only ever happen on your keypress.
   neighbouring bar panel, as in every Omarchy panel.
 - **Window** laid out like Reminders.app: Today / Scheduled / All tiles,
   your lists in their groups with their own colours and emblems, the list
-  title in its colour, tick circles, notes and due dates, a foldable
-  completed section, a New Reminder row. Keyboard follows the platform
+  title in its colour, your lists' **section headings** with the reminders
+  under them in the order you gave them on the Mac, tick circles, notes and
+  due dates, a foldable completed section, a New Reminder row. Keyboard follows the platform
   convention: **Tab** moves between sidebar, list and the new-reminder
   field, **arrows** (or `j`/`k`) move within the focused region, **Left/
   Right** (or `h`/`l`) jump between sidebar and list and fold groups,
@@ -152,11 +153,17 @@ tikk check                                # is the Mac answering, is the grant i
 medium, low). Exit codes follow `sysexits.h`: 64 usage, 65 ambiguous, 66 not
 found, 69 gateway or backend failure, 77 no permission, 78 tool missing.
 
-`snapshot` also carries what EventKit does not expose: Reminders.app's list
-**groups**, each list's **colour**, emblem and shared flag, read from
-Reminders' own store on the Mac (on a copy, read-only, never written). That
+`snapshot` and `show` also carry what EventKit does not expose: Reminders.app's
+list **groups**, each list's **colour**, emblem and shared flag, each list's
+**sections** and which section and manual position every reminder has, all
+read from Reminders' own store on the Mac (read-only, never written). That
 needs the SSH session to have Full Disk Access; without it you get a flat
 list of lists and everything else still works.
+
+One limit to know: EventKit cannot place a reminder in a section, so a
+reminder added from tikk lands unsectioned, at the top of the list, exactly
+as one added through Siri or the Watch does. Drag it into a section on the
+Mac or phone if you want it there.
 
 ## Security model
 

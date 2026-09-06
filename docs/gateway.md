@@ -151,7 +151,7 @@ is the contract.
 |---|---|---|
 | `lists` | | `["Groceries", …]` |
 | `show` | `<list> [--all\|--done]` | `[reminder, …]` |
-| `snapshot` | | `{"lists": [{name, open, group, color, emblem, shared, order}], "groups": [{name, lists:[…]}], "reminders": [reminder, …]}` |
+| `snapshot` | | `{"lists": [{name, open, group, color, emblem, shared, order, sections:[…]}], "groups": [{name, lists:[…]}], "reminders": [reminder, …]}` |
 | `add` | `<list> <name> [--body …] [--due YYYY-MM-DD \| "YYYY-MM-DD HH:MM"] [--priority 0\|1\|5\|9]` | the created `reminder` |
 | `complete` / `uncomplete` / `delete` | `<list> <id-or-exact-name>` | `{"id": …, "completed": true}` etc. |
 | `check` | | `{"ok", "version", "lists", "ms", "backend", "tool", "store_meta", "allow_lists", "audit_log"}` |
@@ -160,8 +160,14 @@ A `reminder`:
 
 ```json
 {"id": "UUID", "name": "…", "body": "…" | null, "due": "2026-09-10T18:00:00+02:00" | null,
- "allday": false, "priority": 0, "completed": false, "completed_at": null, "list": "Groceries"}
+ "allday": false, "priority": 0, "completed": false, "completed_at": null, "list": "Groceries",
+ "section": "Produce" | null, "position": 17 | null}
 ```
+
+`section` and `position` (the list's manual order) come from the Reminders
+store and are null without Full Disk Access. Sections cannot be written:
+EventKit has no notion of them, so `add` always creates an unsectioned
+reminder, which Reminders.app shows at the top of the list.
 
 Dates are ISO 8601 in the Mac's local zone; `allday` is true when the due
 date is a local midnight, which is how EventKit stores date-only reminders.

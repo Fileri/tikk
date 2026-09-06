@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.4.0 — 2026-09-06
+
+Sections. The gateway reads each list's section headings, which section
+every reminder belongs to and its manual position from the Reminders store
+(`sections` on lists, `section` and `position` on reminders). Window and
+panel show the headings with the reminders under them in the Mac's order,
+unsectioned ones first, as Reminders.app does; the cursor skips headings.
+New IPC `open_list <name>` opens the window on a list. Adding into a section
+is not possible through EventKit; new reminders land unsectioned.
+
 ## 0.3.0 — 2026-09-06
 
 Keyboard navigation follows the platform convention. Window: Tab between

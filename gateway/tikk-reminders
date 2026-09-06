@@ -36,9 +36,10 @@ import sqlite3
 import subprocess
 import sys
 import time
+import uuid
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
-VERSION = "0.2.1"
+VERSION = "0.4.0"
 
 # ----------------------------------------------------------------- 1. constants
 # Looked up in this order; nothing user-writable earlier than the tool itself.
@@ -147,8 +148,48 @@ def require_verb(cfg: Dict[str, Any], verb: str) -> None:
 # fails we retry with `immutable=1`, which needs no lock and may lag the WAL.
 # Needs Full Disk Access for the ssh session; without it, or if Apple changes
 # the schema, we return nothing and the client shows a flat list.
-STORE_QUERY = ("select Z_PK, ZISGROUP, ZNAME, ZPARENTLIST, ZDADISPLAYORDER, ZBADGEEMBLEM, ZSHARINGSTATUS, ZCOLOR "
+STORE_QUERY = ("select Z_PK, ZISGROUP, ZNAME, ZPARENTLIST, ZDADISPLAYORDER, ZBADGEEMBLEM, ZSHARINGSTATUS, ZCOLOR, "
+               "ZSECTIONIDSORDERINGASDATA, ZMEMBERSHIPSOFREMINDERSINSECTIONSASDATA, ZREMINDERIDSMERGEABLEORDERING_V2_JSON "
                "from ZREMCDBASELIST where ZMARKEDFORDELETION=0 and ZNAME is not null and ZISGROUP is not null")
+SECTION_QUERY = "select ZLIST, ZIDENTIFIER, ZDISPLAYNAME from ZREMCDBASESECTION where ZMARKEDFORDELETION=0 and ZLIST is not null"
+
+
+def uuid_str(value: Any) -> Optional[str]:
+    """The store keeps some identifiers as 16 raw bytes and some as text; EventKit's externalId is the upper-case text form."""
+    if value is None:
+        return None
+    if isinstance(value, (bytes, bytearray)):
+        try:
+            return str(uuid.UUID(bytes=bytes(value))).upper()
+        except ValueError:
+            return None
+    return str(value).upper()
+
+
+def json_blob(blob: Any, default: Any) -> Any:
+    try:
+        return json.loads(blob) if blob else default
+    except (ValueError, TypeError):
+        return default
+
+
+def list_sections(row: Tuple, sections_of_list: Dict[str, str]) -> Tuple[List[str], Dict[str, str], Dict[str, int]]:
+    """From one list row → (section names in display order, reminder id → section name, reminder id → manual position).
+
+    Reminders.app keeps sections as separate objects and their membership and
+    order as three JSON blobs on the list. A reminder with no membership is
+    unsectioned, which the app shows at the top of the list.
+    """
+    order_blob, member_blob, ids_blob = row[8], row[9], row[10]
+    ordered_ids = [str(x).upper() for x in json_blob(order_blob, {}).get("orderedIdentifiers", [])]
+    names = [sections_of_list[i] for i in ordered_ids if i in sections_of_list]
+    by_reminder = {}
+    for m in json_blob(member_blob, {}).get("memberships", []):
+        sec = sections_of_list.get(str(m.get("groupID", "")).upper())
+        if sec is not None and m.get("memberID"):
+            by_reminder[str(m["memberID"]).upper()] = sec
+    positions = {str(x).upper(): i for i, x in enumerate(json_blob(ids_blob, []))}
+    return names, by_reminder, positions
 
 
 def plist_color(blob: bytes) -> Optional[str]:
@@ -176,38 +217,72 @@ def emblem_of(raw: Optional[str]) -> Optional[str]:
     return str(raw)
 
 
-def store_rows(store: str) -> List[Tuple]:
+def store_rows(store: str) -> Tuple[List[Tuple], List[Tuple]]:
+    """(list rows, section rows) from one store file, or ([], []) if it cannot be read."""
     for params in ("mode=ro", "mode=ro&immutable=1"):
         try:
             con = sqlite3.connect("file:%s?%s" % (store, params), uri=True, timeout=1.0)
             try:
-                return con.execute(STORE_QUERY).fetchall()
+                lists = con.execute(STORE_QUERY).fetchall()
+                try:
+                    sections = con.execute(SECTION_QUERY).fetchall()
+                except sqlite3.Error:
+                    sections = []
+                return lists, sections
             finally:
                 con.close()
         except sqlite3.Error:
             continue
-    return []
+    return [], []
 
 
 def store_meta(stores: Optional[Iterable[str]] = None) -> Dict[str, Any]:
-    """→ {"lists": {name: {group, color, emblem, shared, order}}, "groups": [{name, order}]}"""
+    """→ {"lists": {name: {group, color, emblem, shared, order, sections, section_of, position_of}},
+          "groups": [{name, order}]}"""
     meta: Dict[str, Any] = {"lists": {}, "groups": []}
     for store in sorted(stores if stores is not None else glob.glob(STORE_GLOB)):
-        rows = store_rows(store)
+        rows, section_rows = store_rows(store)
         by_pk = {r[0]: r for r in rows}
-        for pk, isgroup, name, parent, order, emblem, shared, color in rows:
+        sections_by_list: Dict[Any, Dict[str, str]] = {}
+        for list_pk, ident, display in section_rows:
+            key = uuid_str(ident)
+            if key and display is not None:
+                sections_by_list.setdefault(list_pk, {})[key] = display
+        for row in rows:
+            pk, isgroup, name, parent, order, emblem, shared, color = row[:8]
             if isgroup:
                 meta["groups"].append({"name": name, "order": order or 0})
-            else:
-                meta["lists"][name] = {
-                    "group": by_pk[parent][2] if parent in by_pk else None,
-                    "color": plist_color(color) if color else None,
-                    "emblem": emblem_of(emblem),
-                    "shared": bool(shared),
-                    "order": order or 0,
-                }
+                continue
+            names, section_of, position_of = list_sections(row, sections_by_list.get(pk, {}))
+            meta["lists"][name] = {
+                "group": by_pk[parent][2] if parent in by_pk else None,
+                "color": plist_color(color) if color else None,
+                "emblem": emblem_of(emblem),
+                "shared": bool(shared),
+                "order": order or 0,
+                "sections": names,
+                "section_of": section_of,
+                "position_of": position_of,
+            }
     meta["groups"].sort(key=lambda g: g["order"])
     return meta
+
+
+def decorate(records: List[Record], meta: Dict[str, Any]) -> List[Record]:
+    """Attach `section` (name or null) and `position` (manual order, or null) from the store to each record."""
+    for r in records:
+        m = meta["lists"].get(r.get("list") or "", {})
+        rid = str(r["id"]).upper()
+        r["section"] = m.get("section_of", {}).get(rid)
+        r["position"] = m.get("position_of", {}).get(rid)
+    return records
+
+
+def safe_meta() -> Dict[str, Any]:
+    try:
+        return store_meta()
+    except Exception:
+        return {"lists": {}, "groups": []}
 
 
 # -------------------------------------------------- 4. reminders-cli backend
@@ -379,15 +454,14 @@ def verb_snapshot(a, cfg) -> Tuple[Any, str]:
     counts: Dict[str, int] = {}
     for r in records:
         counts[r["list"]] = counts.get(r["list"], 0) + 1
-    try:
-        meta = store_meta()
-    except Exception:
-        meta = {"lists": {}, "groups": []}
+    meta = safe_meta()
+    decorate(records, meta)
     lists = []
     for n in names:
         m = meta["lists"].get(n, {})
         lists.append({"name": n, "open": counts.get(n, 0), "group": m.get("group"), "color": m.get("color"),
-                      "emblem": m.get("emblem"), "shared": m.get("shared", False), "order": m.get("order", 0)})
+                      "emblem": m.get("emblem"), "shared": m.get("shared", False), "order": m.get("order", 0),
+                      "sections": m.get("sections", [])})
     groups = [{"name": g["name"], "lists": [l["name"] for l in lists if l["group"] == g["name"]]} for g in meta["groups"]]
     groups = [g for g in groups if g["lists"]]
     snap = {"lists": lists, "groups": groups, "reminders": records}
@@ -412,7 +486,7 @@ def verb_check(a, cfg) -> Tuple[Any, str]:
 
 
 def verb_show(a, cfg) -> Tuple[Any, str]:
-    records = fetch(a.list, "done" if a.done else ("all" if a.all else "open"))
+    records = decorate(fetch(a.list, "done" if a.done else ("all" if a.all else "open")), safe_meta())
     return records, format_reminders(records)
 
 
