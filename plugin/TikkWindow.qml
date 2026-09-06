@@ -40,7 +40,8 @@ FloatingWindow {
   readonly property color urgent: Color.urgent
   readonly property color onTint: Color.background      // text on an accent-filled surface
   readonly property color rowHover: Style.hoverFillFor(fg, Color.accent)
-  readonly property color rowSelected: Style.selectedFillFor(fg, Color.accent)
+  readonly property color rowSelected: Style.selectedFillFor(fg, Color.accent)      // selected, region focused
+  readonly property color rowSelectedIdle: Style.hoverFillFor(fg, Color.accent)     // selected, region not focused
   readonly property color focusBorder: Style.focusBorderFor(fg, Color.accent)
   readonly property int focusWidth: Math.max(1, Style.focusBorderWidth)
   readonly property color sidebarBg: Style.normalFillFor(fg, Color.accent)
@@ -304,7 +305,7 @@ FloatingWindow {
                 Layout.fillWidth: true
                 Layout.preferredHeight: Style.space(64)
                 radius: Style.cornerRadius
-                color: active ? tint : (tileMouse.containsMouse ? win.rowHover : win.tileFill)
+                color: active ? (win.region === "sidebar" ? tint : Util.alpha(tint, 0.55)) : (tileMouse.containsMouse ? win.rowHover : win.tileFill)
                 border.width: focused ? win.focusWidth : 0
                 border.color: focused ? (active ? win.onTint : win.focusBorder) : "transparent"
                 Rectangle {
@@ -364,7 +365,8 @@ FloatingWindow {
               width: listList.width
               height: Style.spacing.popupRowHeight
               radius: Style.cornerRadius
-              color: active ? win.rowSelected : (rowMouse.containsMouse ? win.rowHover : "transparent")
+              color: active ? (win.region === "sidebar" ? win.rowSelected : win.rowSelectedIdle)
+                            : (rowMouse.containsMouse ? win.rowHover : "transparent")
               border.width: focused ? win.focusWidth : 0
               border.color: focused ? win.focusBorder : "transparent"
               RowLayout {
@@ -499,7 +501,7 @@ FloatingWindow {
               opacity: pending ? 0.5 : 1
               Rectangle {
                 anchors.fill: parent; radius: Style.cornerRadius
-                color: selected ? win.rowSelected : (mm.containsMouse ? win.rowHover : "transparent")
+                color: selected ? (win.region === "list" ? win.rowSelected : win.rowSelectedIdle) : (mm.containsMouse ? win.rowHover : "transparent")
                 border.width: focused ? win.focusWidth : 0
                 border.color: focused ? win.focusBorder : "transparent"
               }
