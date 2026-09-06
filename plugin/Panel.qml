@@ -17,7 +17,11 @@ Panel {
   property var hostWidget: null
   readonly property var host: hostWidget
   readonly property color fg: bar ? bar.foreground : Color.foreground
+  readonly property color urgent: bar ? bar.urgent : Color.urgent
   readonly property string fontFamily: bar ? bar.fontFamily : Style.font.family
+  // theme state tokens, same helpers the first-party panels use
+  readonly property color hoverFill: Style.hoverFillFor(fg, Color.accent)
+  readonly property color selectedFill: Style.selectedFillFor(fg, Color.accent)
 
   property int cursor: 0
   readonly property var items: host ? host.items : []
@@ -88,7 +92,7 @@ Panel {
       ColumnLayout {
         id: column
         anchors.fill: parent
-        spacing: Style.spacing.md
+        spacing: Style.spacing.rowGap
 
         // ---- header: list name, status
         RowLayout {
@@ -104,7 +108,7 @@ Panel {
           }
           Text {
             text: !root.host ? "" : (!root.host.online ? "offline" : (root.host.loading ? "…" : root.count + " open"))
-            color: root.host && root.host.online ? Color.muted : Color.urgent
+            color: root.host && root.host.online ? Color.muted : root.urgent
             font.family: root.fontFamily
             font.pixelSize: Style.font.caption
           }
@@ -112,7 +116,7 @@ Panel {
         Text {
           visible: root.host && root.host.lastError !== ""
           text: root.host ? root.host.lastError : ""
-          color: Color.urgent
+          color: root.urgent
           font.family: root.fontFamily
           font.pixelSize: Style.font.caption
           wrapMode: Text.Wrap
@@ -127,22 +131,22 @@ Panel {
           implicitHeight: Layout.preferredHeight
           clip: true
           model: root.items
-          spacing: Style.spacing.xs
+          spacing: Style.spacing.xxs
           delegate: Rectangle {
             required property var modelData
             required property int index
             readonly property bool selected: index === root.cursor
             readonly property bool pending: String(modelData.id).indexOf("pending-") === 0
             width: listView.width
-            height: rowText.implicitHeight + Style.spacing.lg * 2
-            radius: Style.space(6)
-            color: selected ? Qt.rgba(root.fg.r, root.fg.g, root.fg.b, 0.10) : "transparent"
+            height: rowText.implicitHeight + Style.spacing.rowPaddingX
+            radius: Style.cornerRadius
+            color: selected ? root.selectedFill : (rowMouse.containsMouse ? root.hoverFill : "transparent")
             opacity: pending ? 0.5 : 1.0
             RowLayout {
               anchors.fill: parent
-              anchors.leftMargin: Style.spacing.lg
-              anchors.rightMargin: Style.spacing.lg
-              spacing: Style.spacing.lg
+              anchors.leftMargin: Style.spacing.rowPaddingX / 2
+              anchors.rightMargin: Style.spacing.rowPaddingX / 2
+              spacing: Style.spacing.controlGap
               Text {
                 text: "☐"
                 color: root.fg
@@ -167,6 +171,7 @@ Panel {
               }
             }
             MouseArea {
+              id: rowMouse
               anchors.fill: parent
               hoverEnabled: true
               onEntered: root.cursor = index

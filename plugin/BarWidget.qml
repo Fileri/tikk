@@ -170,7 +170,7 @@ BarWidget {
     function show(): void { root.open() }
     function hide(): void { root.close() }
     function toggle(): void { root.toggle() }
-    function app(): void { root.app() }
+    function app(): string { return root.app() }
     function refresh(): string { root.refresh(); return "ok" }
     function add(name: string): string {
       if (!root.online) return "offline"
@@ -187,17 +187,26 @@ BarWidget {
     }
   }
 
-  // ---- the app window: same data, Reminders.app layout. Loaded on first use.
+  // ---- the app window: same data, Reminders.app layout. Created on open and
+  // destroyed on close (like blip): a hidden FloatingWindow never maps again,
+  // and tearing it down cleanly avoids leaving a dead window under the poller.
   Loader {
     id: windowLoader
     active: false
     source: Qt.resolvedUrl("TikkWindow.qml")
     onLoaded: { item.hostWidget = root; item.visible = true; root.refresh() }
   }
+  Connections {
+    target: windowLoader.item
+    ignoreUnknownSignals: true
+    function onVisibleChanged() { if (windowLoader.item && !windowLoader.item.visible) Qt.callLater(function() { windowLoader.active = false }) }
+  }
+  readonly property bool appOpen: windowLoader.active && windowLoader.item !== null && windowLoader.item.visible
   function app() {
-    if (!windowLoader.active) { windowLoader.active = true; return }
-    windowLoader.item.visible = !windowLoader.item.visible
-    if (windowLoader.item.visible) refresh()
+    var wasOpen = appOpen
+    if (wasOpen) windowLoader.item.visible = false   // → Connections tears it down
+    else windowLoader.active = true
+    return wasOpen ? "closing" : "opening"
   }
 
   // ---- pill: click = panel, double-click = app window, middle = refresh

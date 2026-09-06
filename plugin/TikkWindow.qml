@@ -27,12 +27,19 @@ FloatingWindow {
   minimumSize: Qt.size(640, 420)
   visible: false
 
+  // Everything visual comes from the shell theme: Color.* for the palette,
+  // Style.*For for interactive states, Style.cornerRadius and Style.spacing.*
+  // for shape and rhythm. No literal colours in this file.
   readonly property string fontFamily: Style.font.family
   readonly property color fg: Color.foreground
   readonly property color muted: Color.muted
-  readonly property color rowHover: Qt.rgba(fg.r, fg.g, fg.b, 0.06)
-  readonly property color rowSelected: Qt.rgba(fg.r, fg.g, fg.b, 0.12)
-  readonly property color sidebarBg: Qt.rgba(fg.r, fg.g, fg.b, 0.035)
+  readonly property color urgent: Color.urgent
+  readonly property color onTint: Color.background      // text on an accent-filled surface
+  readonly property color rowHover: Style.hoverFillFor(fg, Color.accent)
+  readonly property color rowSelected: Style.selectedFillFor(fg, Color.accent)
+  readonly property color sidebarBg: Style.normalFillFor(fg, Color.accent)
+  readonly property color hairline: Util.alpha(fg, 0.08)
+  readonly property color tileFill: Util.alpha(fg, 0.07)
 
   // ---- selection: a smart list or a real list
   property string kind: "list"        // "today" | "scheduled" | "all" | "list"
@@ -41,13 +48,19 @@ FloatingWindow {
   property bool showDone: false
   property bool sidebarFocus: false
 
-  readonly property var palette: ["#0A84FF", "#FF453A", "#FF9F0A", "#FFD60A", "#30D158", "#BF5AF2", "#64D2FF", "#FF6482", "#AC8E68"]
+  // Per-list colours the way Reminders.app has them, but derived from the
+  // theme: the accent's hue rotated by the golden angle per list, so every
+  // theme switch recolours the lists with it. A grey accent gets a modest
+  // saturation floor so lists stay distinguishable.
   function listColor(name) {
-    var h = 0
-    for (var i = 0; i < name.length; i++) h = (h * 31 + name.charCodeAt(i)) & 0x7fffffff
-    return palette[h % palette.length]
+    var names = host ? host.listNames() : []
+    var i = Math.max(0, names.indexOf(name))
+    var a = Color.accent
+    var sat = a.hslSaturation < 0.25 ? 0.45 : a.hslSaturation
+    var light = Math.min(0.68, Math.max(0.42, a.hslLightness))
+    return Qt.hsla((a.hslHue + i * 0.618034) % 1.0, sat, light, 1)
   }
-  readonly property color accent: kind === "today" ? "#0A84FF" : kind === "scheduled" ? "#FF453A" : kind === "all" ? "#8E8E93" : listColor(listName)
+  readonly property color accent: kind === "today" ? Color.accent : kind === "scheduled" ? urgent : kind === "all" ? muted : listColor(listName)
   readonly property string heading: kind === "today" ? "Today" : kind === "scheduled" ? "Scheduled" : kind === "all" ? "All" : listName
 
   // ---- dates
@@ -139,54 +152,55 @@ FloatingWindow {
 
       // ================================================================ sidebar
       Rectangle {
-        Layout.preferredWidth: 236
+        Layout.preferredWidth: Style.space(236)
         Layout.fillHeight: true
         color: win.sidebarBg
         ColumnLayout {
           anchors.fill: parent
-          anchors.margins: Style.space(12)
-          spacing: Style.space(10)
+          anchors.margins: Style.spacing.popupPadding
+          spacing: Style.spacing.rowGap
 
           // smart list tiles, 2 per row like Reminders.app
           GridLayout {
             Layout.fillWidth: true
             columns: 2
-            columnSpacing: Style.space(8)
-            rowSpacing: Style.space(8)
+            columnSpacing: Style.spacing.controlGap
+            rowSpacing: Style.spacing.controlGap
             Repeater {
               model: [
-                { k: "today", label: "Today", icon: "󰃭", color: "#0A84FF", n: win.todayCount },
-                { k: "scheduled", label: "Scheduled", icon: "󰸘", color: "#FF453A", n: win.scheduledCount },
-                { k: "all", label: "All", icon: "󰉹", color: "#8E8E93", n: win.allCount }
+                { k: "today", label: "Today", icon: "󰃭", n: win.todayCount },
+                { k: "scheduled", label: "Scheduled", icon: "󰸘", n: win.scheduledCount },
+                { k: "all", label: "All", icon: "󰉹", n: win.allCount }
               ]
               delegate: Rectangle {
                 required property var modelData
                 readonly property bool active: win.kind === modelData.k
+                readonly property color tint: modelData.k === "today" ? Color.accent : modelData.k === "scheduled" ? win.urgent : win.muted
                 Layout.fillWidth: true
                 Layout.preferredHeight: Style.space(64)
-                radius: Style.space(10)
-                color: active ? modelData.color : Qt.rgba(win.fg.r, win.fg.g, win.fg.b, 0.07)
+                radius: Style.cornerRadius
+                color: active ? tint : (tileMouse.containsMouse ? win.rowHover : win.tileFill)
                 Rectangle {
-                  x: Style.space(10); y: Style.space(10)
+                  x: Style.spacing.controlPaddingX; y: Style.spacing.controlPaddingX
                   width: Style.space(26); height: width; radius: width / 2
-                  color: parent.active ? Qt.rgba(1, 1, 1, 0.3) : modelData.color
-                  Text { anchors.centerIn: parent; text: modelData.icon; color: "white"; font.pixelSize: Style.font.subtitle }
+                  color: parent.active ? Util.alpha(win.onTint, 0.25) : parent.tint
+                  Text { anchors.centerIn: parent; text: modelData.icon; color: win.onTint; font.pixelSize: Style.font.subtitle }
                 }
                 Text {
                   anchors.right: parent.right; anchors.top: parent.top
-                  anchors.rightMargin: Style.space(10); anchors.topMargin: Style.space(6)
+                  anchors.rightMargin: Style.spacing.controlPaddingX; anchors.topMargin: Style.spacing.controlPaddingY
                   text: modelData.n
-                  color: parent.active ? "white" : win.fg
+                  color: parent.active ? win.onTint : win.fg
                   font.family: win.fontFamily; font.pixelSize: Style.font.heading; font.bold: true
                 }
                 Text {
                   anchors.left: parent.left; anchors.bottom: parent.bottom
-                  anchors.leftMargin: Style.space(10); anchors.bottomMargin: Style.space(8)
+                  anchors.leftMargin: Style.spacing.controlPaddingX; anchors.bottomMargin: Style.spacing.controlPaddingY
                   text: modelData.label
-                  color: parent.active ? "white" : win.muted
+                  color: parent.active ? win.onTint : win.muted
                   font.family: win.fontFamily; font.pixelSize: Style.font.bodySmall; font.bold: true
                 }
-                MouseArea { anchors.fill: parent; onClicked: win.select(modelData.k) }
+                MouseArea { id: tileMouse; anchors.fill: parent; hoverEnabled: true; onClicked: win.select(modelData.k) }
               }
             }
           }
@@ -195,30 +209,30 @@ FloatingWindow {
             text: "My Lists"
             color: win.muted
             font.family: win.fontFamily; font.pixelSize: Style.font.caption; font.bold: true
-            Layout.topMargin: Style.space(6)
+            Layout.topMargin: Style.spacing.labelGap
           }
           ListView {
             id: listList
             Layout.fillWidth: true
             Layout.fillHeight: true
             clip: true
-            spacing: Style.space(2)
+            spacing: Style.spacing.xxs
             model: win.host ? win.host.lists : []
             delegate: Rectangle {
               required property var modelData
               readonly property bool active: win.kind === "list" && win.listName === modelData.name
               width: listList.width
-              height: Style.space(30)
-              radius: Style.space(6)
+              height: Style.spacing.popupRowHeight
+              radius: Style.cornerRadius
               color: active ? win.rowSelected : (rowMouse.containsMouse ? win.rowHover : "transparent")
               RowLayout {
                 anchors.fill: parent
-                anchors.leftMargin: Style.space(8); anchors.rightMargin: Style.space(10)
-                spacing: Style.space(8)
+                anchors.leftMargin: Style.spacing.controlPaddingX; anchors.rightMargin: Style.spacing.controlPaddingX
+                spacing: Style.spacing.controlGap
                 Rectangle {
                   width: Style.space(20); height: width; radius: width / 2
                   color: win.listColor(modelData.name)
-                  Text { anchors.centerIn: parent; text: "󰉹"; color: "white"; font.pixelSize: Style.font.caption }
+                  Text { anchors.centerIn: parent; text: "󰉹"; color: win.onTint; font.pixelSize: Style.font.caption }
                 }
                 Text {
                   Layout.fillWidth: true
@@ -238,7 +252,7 @@ FloatingWindow {
           }
           Text {
             text: win.host ? (win.host.online ? (win.host.loading ? "refreshing…" : "") : "gateway offline") : ""
-            color: win.host && win.host.online ? win.muted : Color.urgent
+            color: win.host && win.host.online ? win.muted : win.urgent
             font.family: win.fontFamily; font.pixelSize: Style.font.caption
           }
         }
@@ -250,8 +264,8 @@ FloatingWindow {
         Layout.fillHeight: true
         ColumnLayout {
           anchors.fill: parent
-          anchors.margins: Style.space(22)
-          spacing: Style.space(6)
+          anchors.margins: Style.spacing.panelPadding
+          spacing: Style.spacing.labelGap
 
           RowLayout {
             Layout.fillWidth: true
@@ -271,7 +285,7 @@ FloatingWindow {
           }
           RowLayout {
             visible: win.kind === "list"
-            spacing: Style.space(6)
+            spacing: Style.spacing.labelGap
             Text {
               text: win.showDone ? (win.doneRows.length + " Completed") : "Completed"
               color: win.muted
@@ -287,7 +301,7 @@ FloatingWindow {
             Text {
               visible: win.host && win.host.lastError !== ""
               text: "  " + (win.host ? win.host.lastError : "")
-              color: Color.urgent
+              color: win.urgent
               font.family: win.fontFamily; font.pixelSize: Style.font.bodySmall
             }
           }
@@ -307,34 +321,34 @@ FloatingWindow {
               readonly property bool done: modelData.completed === true
               readonly property string sub: [modelData.body || "", win.dueLabel(modelData)].filter(function(x) { return x !== "" }).join("  ·  ")
               width: mainList.width
-              height: rowCol.implicitHeight + Style.space(14)
+              height: rowCol.implicitHeight + Style.spacing.rowPaddingX
               opacity: pending ? 0.5 : 1
-              Rectangle { anchors.fill: parent; radius: Style.space(6); color: selected ? win.rowSelected : (mm.containsMouse ? win.rowHover : "transparent") }
+              Rectangle { anchors.fill: parent; radius: Style.cornerRadius; color: selected ? win.rowSelected : (mm.containsMouse ? win.rowHover : "transparent") }
               Rectangle {   // separator like Reminders' hairlines
                 anchors.left: parent.left; anchors.right: parent.right; anchors.bottom: parent.bottom
-                anchors.leftMargin: Style.space(34); height: 1
-                color: Qt.rgba(win.fg.r, win.fg.g, win.fg.b, 0.08)
+                anchors.leftMargin: Style.space(34); height: Style.spacing.hairline
+                color: win.hairline
               }
               RowLayout {
                 anchors.fill: parent
-                anchors.leftMargin: Style.space(6); anchors.rightMargin: Style.space(6)
-                spacing: Style.space(10)
+                anchors.leftMargin: Style.spacing.rowPaddingX / 2; anchors.rightMargin: Style.spacing.rowPaddingX / 2
+                spacing: Style.spacing.controlGap
                 Rectangle {   // the tick circle
                   id: circle
                   Layout.alignment: Qt.AlignTop
-                  Layout.topMargin: Style.space(9)
+                  Layout.topMargin: Style.spacing.lg
                   width: Style.space(18); height: width; radius: width / 2
                   color: done ? win.accent : "transparent"
-                  border.width: Style.space(1.5)
+                  border.width: Math.max(1, Style.space(1.5))
                   border.color: done || circleMouse.containsMouse ? win.accent : win.muted
                   Rectangle { anchors.centerIn: parent; width: parent.width - Style.space(6); height: width; radius: width / 2; color: win.accent; visible: !done && circleMouse.containsMouse }
-                  Text { anchors.centerIn: parent; text: "✓"; color: "white"; visible: done; font.pixelSize: Style.font.caption; font.bold: true }
+                  Text { anchors.centerIn: parent; text: "✓"; color: win.onTint; visible: done; font.pixelSize: Style.font.caption; font.bold: true }
                   MouseArea { id: circleMouse; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: win.tick(modelData) }
                 }
                 ColumnLayout {
                   id: rowCol
                   Layout.fillWidth: true
-                  spacing: Style.space(2)
+                  spacing: Style.spacing.xxs
                   Text {
                     Layout.fillWidth: true
                     textFormat: Text.StyledText
@@ -349,7 +363,7 @@ FloatingWindow {
                     visible: sub !== "" || win.kind !== "list"
                     Layout.fillWidth: true
                     text: win.kind !== "list" ? [modelData.list, sub].filter(function(x) { return x !== "" }).join("  ·  ") : sub
-                    color: !done && win.isOverdue(modelData) ? "#FF453A" : win.muted
+                    color: !done && win.isOverdue(modelData) ? win.urgent : win.muted
                     font.family: win.fontFamily; font.pixelSize: Style.font.bodySmall
                     elide: Text.ElideRight
                   }
@@ -360,7 +374,7 @@ FloatingWindow {
                   color: win.muted
                   font.pixelSize: Style.font.body
                   Layout.alignment: Qt.AlignVCenter
-                  MouseArea { anchors.fill: parent; anchors.margins: -Style.space(6); cursorShape: Qt.PointingHandCursor; onClicked: win.host.remove(modelData) }
+                  MouseArea { anchors.fill: parent; anchors.margins: -Style.spacing.md; cursorShape: Qt.PointingHandCursor; onClicked: win.host.remove(modelData) }
                 }
               }
               MouseArea {
@@ -383,12 +397,12 @@ FloatingWindow {
           // ---- new reminder row
           RowLayout {
             Layout.fillWidth: true
-            spacing: Style.space(10)
+            spacing: Style.spacing.controlGap
             Rectangle {
               width: Style.space(18); height: width; radius: width / 2
               color: newField.activeFocus ? win.accent : "transparent"
-              border.width: Style.space(1.5); border.color: newField.activeFocus ? win.accent : win.muted
-              Text { anchors.centerIn: parent; text: "+"; color: newField.activeFocus ? "white" : win.muted; font.pixelSize: Style.font.body; font.bold: true }
+              border.width: Math.max(1, Style.space(1.5)); border.color: newField.activeFocus ? win.accent : win.muted
+              Text { anchors.centerIn: parent; text: "+"; color: newField.activeFocus ? win.onTint : win.muted; font.pixelSize: Style.font.body; font.bold: true }
               MouseArea { anchors.fill: parent; onClicked: newField.forceActiveFocus() }
             }
             TextField {
